@@ -57,6 +57,7 @@ impl EngineerRegistry {
             .get(&engineer_key(&engineer))
             .expect("engineer not found");
         assert!(record.issuer == issuer, "not the issuer");
+        assert!(record.active, "credential already revoked");
         record.active = false;
         env.storage().persistent().set(&engineer_key(&engineer), &record);
         
