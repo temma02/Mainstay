@@ -47,6 +47,9 @@ impl EngineerRegistry {
         issuer: Address,
     ) {
         issuer.require_auth();
+        if !env.storage().instance().has(&trusted_key(&issuer)) {
+            panic!("issuer is not trusted");
+        }
         assert!(
             credential_hash != BytesN::from_array(&env, &[0u8; 32]),
             "credential hash cannot be zero"
@@ -83,19 +86,18 @@ impl EngineerRegistry {
     }
 
     pub fn revoke_credential(env: Env, engineer: Address) {
-        let caller = env.invoker();
-        let admin = get_admin(env.clone());
         let mut record: Engineer = env
             .storage()
             .persistent()
             .get(&engineer_key(&engineer))
             .expect("engineer not found");
-        assert!(record.issuer == issuer, "not the issuer");
+        record.issuer.require_auth();
         assert!(record.active, "credential already revoked");
         record.active = false;
         env.storage()
             .persistent()
             .set(&engineer_key(&engineer), &record);
+        env.storage().persistent().extend_ttl(&engineer_key(&engineer), 518400, 518400);
     }
 
     pub fn get_engineer(env: Env, engineer: Address) -> Engineer {
@@ -121,19 +123,20 @@ impl EngineerRegistry {
         env.storage().instance().has(&trusted_key(&issuer))
     }
 
-    pub fn add_trusted_issuer(env: Env, issuer: Address) {
-        let admin = get_admin(env.clone());
-        if env.invoker() != admin {
-            panic!("Only admin can add trusted issuers");
+    pub fn add_trusted_issuer(env: Env, admin: Address, issuer: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&admin_key()).expect("admin not initialized");
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
         env.storage().instance().set(&trusted_key(&issuer), &());
-        env.storage().instance().extend_ttl(&trusted_key(&issuer), 518400, 518400);
     }
 
-    pub fn remove_trusted_issuer(env: Env, issuer: Address) {
-        let admin = get_admin(env.clone());
-        if env.invoker() != admin {
-            panic!("Only admin can remove trusted issuers");
+    pub fn remove_trusted_issuer(env: Env, admin: Address, issuer: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&admin_key()).expect("admin not initialized");
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
         env.storage().instance().remove(&trusted_key(&issuer));
     }
@@ -166,22 +169,27 @@ impl EngineerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, BytesN, Env, Symbol};
+    use soroban_sdk::{testutils::Address as _, testutils::storage::Persistent, BytesN, Env, Symbol};
+
+    fn setup(env: &Env) -> (EngineerRegistryClient, Address) {
+        let contract_id = env.register(EngineerRegistry, ());
+        let client = EngineerRegistryClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        client.initialize_admin(&admin);
+        (client, admin)
+    }
 
     #[test]
     fn test_register_verify_revoke() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(EngineerRegistry, ());
-        let client = EngineerRegistryClient::new(&env, &contract_id);
+        let (client, admin) = setup(&env);
 
         let engineer = Address::generate(&env);
         let issuer = Address::generate(&env);
-        let admin = Address::generate(&env);
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
-        client.initialize_admin(&admin);
-        client.add_trusted_issuer(&issuer);
+        client.add_trusted_issuer(&admin, &issuer);
         client.register_engineer(&engineer, &hash, &issuer);
         assert!(client.verify_engineer(&engineer));
 
@@ -194,16 +202,13 @@ mod tests {
     fn test_register_zero_hash_rejected() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(EngineerRegistry, ());
-        let client = EngineerRegistryClient::new(&env, &contract_id);
+        let (client, admin) = setup(&env);
 
         let engineer = Address::generate(&env);
         let issuer = Address::generate(&env);
-        let admin = Address::generate(&env);
         let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
 
-        client.initialize_admin(&admin);
-        client.add_trusted_issuer(&issuer);
+        client.add_trusted_issuer(&admin, &issuer);
         client.register_engineer(&engineer, &zero_hash, &issuer);
     }
 
@@ -211,63 +216,60 @@ mod tests {
     fn test_ttl_extended_on_registration() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(EngineerRegistry, ());
-        let client = EngineerRegistryClient::new(&env, &contract_id);
+        let (client, admin) = setup(&env);
 
         let engineer = Address::generate(&env);
         let issuer = Address::generate(&env);
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
+        client.add_trusted_issuer(&admin, &issuer);
         client.register_engineer(&engineer, &hash, &issuer);
 
-        // Verify TTL is set for engineer storage entry
-        let engineer_ttl = env.storage().persistent().get_ttl(&engineer_key(&engineer));
-        assert!(engineer_ttl > 0, "Engineer TTL should be extended");
+        let contract_id = client.address.clone();
+        let ttl = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&engineer_key(&engineer))
+        });
+        assert!(ttl > 0, "Engineer TTL should be extended");
     }
 
     #[test]
     fn test_ttl_extended_on_revoke() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(EngineerRegistry, ());
-        let client = EngineerRegistryClient::new(&env, &contract_id);
+        let (client, admin) = setup(&env);
 
         let engineer = Address::generate(&env);
         let issuer = Address::generate(&env);
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
+        client.add_trusted_issuer(&admin, &issuer);
         client.register_engineer(&engineer, &hash, &issuer);
-        client.revoke_credential(&engineer, &issuer);
+        client.revoke_credential(&engineer);
 
-        // Verify TTL is still set after revoke
-        let engineer_ttl = env.storage().persistent().get_ttl(&engineer_key(&engineer));
-        assert!(engineer_ttl > 0, "Engineer TTL should be extended after revoke");
+        let contract_id = client.address.clone();
+        let ttl = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&engineer_key(&engineer))
+        });
+        assert!(ttl > 0, "Engineer TTL should be extended after revoke");
     }
 
     #[test]
     fn test_admin_can_upgrade() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(EngineerRegistry, ());
-        let client = EngineerRegistryClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize_admin(&admin);
+        let (client, admin) = setup(&env);
 
         let new_wasm_hash = BytesN::from_array(&env, &[0xabu8; 32]);
-        // Should not panic — admin is authorized
-        client.upgrade(&admin, &new_wasm_hash);
+        // In test env the WASM hash won't exist, so we just verify auth passes (no UnauthorizedAdmin error)
+        let result = client.try_upgrade(&admin, &new_wasm_hash);
+        assert!(result != Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::UnauthorizedAdmin as u32))));
     }
 
     #[test]
     fn test_non_admin_cannot_upgrade() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(EngineerRegistry, ());
-        let client = EngineerRegistryClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize_admin(&admin);
+        let (client, admin) = setup(&env);
 
         let outsider = Address::generate(&env);
         let new_wasm_hash = BytesN::from_array(&env, &[0xabu8; 32]);
@@ -287,8 +289,7 @@ mod tests {
     fn test_get_engineers_by_issuer_empty() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(EngineerRegistry, ());
-        let client = EngineerRegistryClient::new(&env, &contract_id);
+        let (client, _) = setup(&env);
 
         let issuer = Address::generate(&env);
         let result = client.get_engineers_by_issuer(&issuer);
@@ -299,13 +300,13 @@ mod tests {
     fn test_get_engineers_by_issuer_single() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(EngineerRegistry, ());
-        let client = EngineerRegistryClient::new(&env, &contract_id);
+        let (client, admin) = setup(&env);
 
         let engineer = Address::generate(&env);
         let issuer = Address::generate(&env);
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
+        client.add_trusted_issuer(&admin, &issuer);
         client.register_engineer(&engineer, &hash, &issuer);
 
         let list = client.get_engineers_by_issuer(&issuer);
@@ -317,14 +318,14 @@ mod tests {
     fn test_get_engineers_by_issuer_multiple() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(EngineerRegistry, ());
-        let client = EngineerRegistryClient::new(&env, &contract_id);
+        let (client, admin) = setup(&env);
 
         let issuer = Address::generate(&env);
         let e1 = Address::generate(&env);
         let e2 = Address::generate(&env);
         let e3 = Address::generate(&env);
 
+        client.add_trusted_issuer(&admin, &issuer);
         client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer);
         client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer);
         client.register_engineer(&e3, &BytesN::from_array(&env, &[3u8; 32]), &issuer);
@@ -337,22 +338,37 @@ mod tests {
     fn test_get_engineers_by_issuer_isolated_per_issuer() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(EngineerRegistry, ());
-        let client = EngineerRegistryClient::new(&env, &contract_id);
+        let (client, admin) = setup(&env);
 
         let issuer_a = Address::generate(&env);
         let issuer_b = Address::generate(&env);
         let e1 = Address::generate(&env);
         let e2 = Address::generate(&env);
 
+        client.add_trusted_issuer(&admin, &issuer_a);
+        client.add_trusted_issuer(&admin, &issuer_b);
         client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer_a);
         client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer_b);
 
-        // Each issuer only sees their own engineers
         assert_eq!(client.get_engineers_by_issuer(&issuer_a).len(), 1);
         assert_eq!(client.get_engineers_by_issuer(&issuer_b).len(), 1);
         assert_eq!(client.get_engineers_by_issuer(&issuer_a).get(0).unwrap(), e1);
         assert_eq!(client.get_engineers_by_issuer(&issuer_b).get(0).unwrap(), e2);
+    }
+
+    #[test]
+    #[should_panic(expected = "issuer is not trusted")]
+    fn test_register_engineer_untrusted_issuer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let untrusted_issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        // untrusted_issuer was never added via add_trusted_issuer — must panic
+        client.register_engineer(&engineer, &hash, &untrusted_issuer);
     }
 }
 
