@@ -26,6 +26,9 @@ pub struct Asset {
 
 const ASSET_COUNT: Symbol = symbol_short!("A_COUNT");
 
+const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
+
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -96,12 +99,53 @@ impl AssetRegistry {
     pub fn asset_count(env: Env) -> u64 {
         env.storage().instance().get(&ASSET_COUNT).unwrap_or(0)
     }
+
+    /// Initialize the admin address (call once on deploy)
+    pub fn initialize_admin(env: Env, admin: Address) {
+        admin.require_auth();
+        if env.storage().instance().has(&ADMIN_KEY) {
+            panic!("Admin already initialized");
+        }
+        env.storage().instance().set(&ADMIN_KEY, &admin);
+    }
+
+    /// Get the current admin address
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().instance().get(&ADMIN_KEY).expect("Admin not initialized")
+    }
+
+    /// Admin-only: Deregister (remove) an asset
+    pub fn deregister_asset(env: Env, asset_id: u64) {
+        let admin = Self::get_admin(env.clone());
+        admin.require_auth();
+        
+        let asset: Asset = env.storage().persistent()
+            .get(&asset_key(asset_id))
+            .expect("Asset not found");
+        
+        // Remove asset storage
+        env.storage().persistent().remove(&asset_key(asset_id));
+        
+        // Remove deduplication key
+        let dk = dedup_key(&asset.owner, &env.crypto().sha256(&Bytes::from(asset.metadata.to_xdr(&env))).into());
+        env.storage().persistent().remove(&dk);
+        
+        // Emit deregistration event
+        env.events().publish(
+            (symbol_short!("DEREG_AST"), asset_id),
+            (asset.asset_type.clone(), asset.owner.clone())
+        );
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::{symbol_short, testutils::{Address as _, Events}, Env, String};
+
+    use crate::AssetRegistryClient;
+
 
     #[test]
     fn test_register_and_get_asset() {
@@ -220,4 +264,35 @@ mod tests {
         let dedup_ttl = env.storage().persistent().get_ttl(&dk);
         assert!(dedup_ttl > 0, "Deduplication key TTL should be extended");
     }
+
+    #[test]
+    fn test_admin_deregister_asset() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        // Setup admin
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        // Register asset
+        let owner = Address::generate(&env);
+        let asset_type = symbol_short!("GENSET");
+        let metadata = String::from_str(&env, "Test Asset SN123");
+        let id = client.register_asset(&asset_type, &metadata, &owner);
+
+        // Verify registered
+        let asset = client.get_asset(&id);
+        assert_eq!(asset.asset_id, id);
+
+        // Admin deregisters
+        env.mock_all_auths();  // For admin auth
+        client.deregister_asset(&id);
+
+        // Verify removed
+        let result = client.try_get_asset(&id);
+        assert!(result.is_err());
+    }
 }
+
