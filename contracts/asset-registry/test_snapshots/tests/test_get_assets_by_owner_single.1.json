@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 3,
+    "address": 2,
     "nonce": 0
   },
   "auth": [
@@ -18,7 +18,7 @@
                   "symbol": "GENSET"
                 },
                 {
-                  "string": "Original spec"
+                  "string": "CAT-3516"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -100,7 +100,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "string": "Original spec"
+                        "string": "CAT-3516"
                       }
                     },
                     {
@@ -141,7 +141,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "bytes": "539492accea0c645f95c3afd0c4f5f8f0b1dfcaaccfae14357d6f9e18bc2f31a"
+                  "bytes": "931ba7e7bca61b41b271f75bd65b4c29ba79fd9e7a2eec32823cc2f1c53dc008"
                 }
               ]
             },
@@ -164,7 +164,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                     },
                     {
-                      "bytes": "539492accea0c645f95c3afd0c4f5f8f0b1dfcaaccfae14357d6f9e18bc2f31a"
+                      "bytes": "931ba7e7bca61b41b271f75bd65b4c29ba79fd9e7a2eec32823cc2f1c53dc008"
                     }
                   ]
                 },

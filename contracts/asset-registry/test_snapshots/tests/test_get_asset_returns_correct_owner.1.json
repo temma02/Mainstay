@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 3,
+    "address": 2,
     "nonce": 0
   },
   "auth": [
@@ -15,10 +15,10 @@
               "function_name": "register_asset",
               "args": [
                 {
-                  "symbol": "GENSET"
+                  "symbol": "TURBINE"
                 },
                 {
-                  "string": "Original spec"
+                  "string": "GE LM2500 Turbine"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -92,7 +92,7 @@
                         "symbol": "asset_type"
                       },
                       "val": {
-                        "symbol": "GENSET"
+                        "symbol": "TURBINE"
                       }
                     },
                     {
@@ -100,7 +100,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "string": "Original spec"
+                        "string": "GE LM2500 Turbine"
                       }
                     },
                     {
@@ -141,7 +141,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "bytes": "539492accea0c645f95c3afd0c4f5f8f0b1dfcaaccfae14357d6f9e18bc2f31a"
+                  "bytes": "2a444525355a1291feca494920107954a872100b4135b116ff8b0e0d51d39b1b"
                 }
               ]
             },
@@ -164,7 +164,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                     },
                     {
-                      "bytes": "539492accea0c645f95c3afd0c4f5f8f0b1dfcaaccfae14357d6f9e18bc2f31a"
+                      "bytes": "2a444525355a1291feca494920107954a872100b4135b116ff8b0e0d51d39b1b"
                     }
                   ]
                 },
