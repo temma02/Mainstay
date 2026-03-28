@@ -830,6 +830,32 @@ mod tests {
     }
 
     #[test]
+    fn test_decay_score_five_points_per_thirty_day_interval() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        for _ in 0..5 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("ENGINE"),
+                &String::from_str(&env, "Build score to 50"),
+                &engineer,
+            );
+        }
+        assert_eq!(client.get_collateral_score(&asset_id), 50);
+
+        env.ledger().with_mut(|li| li.timestamp = li.timestamp + 2 * DEFAULT_DECAY_INTERVAL);
+
+        let decayed = client.decay_score(&asset_id);
+        assert_eq!(decayed, 40);
+        assert_eq!(client.get_collateral_score(&asset_id), 40);
+    }
+
+    #[test]
     fn test_submit_maintenance_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
