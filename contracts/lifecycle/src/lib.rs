@@ -11,6 +11,7 @@ pub enum ContractError {
     NoMaintenanceHistory = 1,
     UnauthorizedEngineer = 2,
     UnauthorizedAdmin = 3,
+    AssetNotFound = 4,
 }
 
 #[contracttype]
@@ -398,6 +399,16 @@ impl Lifecycle {
     }
 
     pub fn get_collateral_score(env: Env, asset_id: u64) -> u32 {
+        // Verify asset exists before returning score
+        let asset_registry: Address = env
+            .storage()
+            .instance()
+            .get(&ASSET_REGISTRY)
+            .expect("asset registry not set");
+        let asset_registry_client =
+            asset_registry::AssetRegistryClient::new(&env, &asset_registry);
+        asset_registry_client.get_asset(&asset_id);
+
         env.storage()
             .persistent()
             .get(&score_key(asset_id))
@@ -728,6 +739,23 @@ mod tests {
 
         let events = env.events().all();
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn test_get_collateral_score_unregistered_asset() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, _) = setup(&env, 0);
+
+        // Query score for non-existent asset ID
+        let result = client.try_get_collateral_score(&999u64);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                asset_registry::ContractError::AssetNotFound as u32,
+            ))),
+        );
     }
 
     // --- Upgrade tests ---
