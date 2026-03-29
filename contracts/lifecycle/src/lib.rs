@@ -280,6 +280,9 @@ impl Lifecycle {
         env.storage()
             .persistent()
             .set(&score_history_key(asset_id), &score_history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&score_history_key(asset_id), 518400, 518400);
 
         // Update last maintenance timestamp for decay tracking
         env.storage()
@@ -643,7 +646,7 @@ mod tests {
     use asset_registry::{AssetRegistry, AssetRegistryClient};
     use soroban_sdk::{
         symbol_short,
-        testutils::{Address as _, Events, Ledger},
+        testutils::{storage::Persistent as _, Address as _, Events, Ledger},
         BytesN, Env, String, TryIntoVal,
     };
 
@@ -1756,5 +1759,29 @@ mod tests {
         assert_eq!(client.get_maintenance_history_page(&asset_id, &10, &2).len(), 0);
         // limit=0 → empty
         assert_eq!(client.get_maintenance_history_page(&asset_id, &0, &0).len(), 0);
+    }
+
+    // --- Issue #106: score_history_key TTL must be extended after write ---
+
+    #[test]
+    fn test_score_history_ttl_extended_after_submit() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "Routine oil change"),
+            &engineer,
+        );
+
+        let ttl = env.as_contract(&client.address, || {
+            env.storage().persistent().get_ttl(&score_history_key(asset_id))
+        });
+        assert!(ttl > 0, "score_history TTL should be extended after submit_maintenance");
     }
 }
