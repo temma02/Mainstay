@@ -860,4 +860,20 @@ mod tests {
         client.deregister_asset(&id);
         assert_eq!(client.get_assets_by_owner(&owner).len(), 0);
     }
+
+    #[test]
+    fn test_register_asset_increments_asset_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let id1 = client.register_asset(&symbol_short!("GENSET"), &String::from_str(&env, "Asset 1"), &owner);
+        let id2 = client.register_asset(&symbol_short!("GENSET"), &String::from_str(&env, "Asset 2"), &owner);
+        let id3 = client.register_asset(&symbol_short!("GENSET"), &String::from_str(&env, "Asset 3"), &owner);
+
+        assert_eq!(client.asset_count(), 3);
+        assert_eq!((id1, id2, id3), (1, 2, 3));
+    }
 }
