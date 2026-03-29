@@ -674,7 +674,13 @@ impl Lifecycle {
     }
 
     /// Admin-only: reset an asset's collateral score to zero.
-    /// Use in cases of fraud or after an asset transfer.
+    ///
+    /// Use this after a major incident, asset rebuild, or verified fraud event
+    /// to clear the score and force re-establishment of the maintenance record.
+    ///
+    /// # Panics
+    /// - [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// - [`ContractError::UnauthorizedAdmin`] if `admin` does not match the stored config admin.
     pub fn reset_score(env: Env, admin: Address, asset_id: u64) {
         admin.require_auth();
 
