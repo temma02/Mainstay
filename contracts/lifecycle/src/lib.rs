@@ -254,6 +254,9 @@ impl Lifecycle {
         env.storage()
             .persistent()
             .set(&history_key(asset_id), &history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&history_key(asset_id), 518400, 518400);
 
         // Update collateral score
         let score: u32 = env
@@ -266,6 +269,9 @@ impl Lifecycle {
         env.storage()
             .persistent()
             .set(&score_key(asset_id), &new_score);
+        env.storage()
+            .persistent()
+            .extend_ttl(&score_key(asset_id), 518400, 518400);
 
         // Append (timestamp, score) snapshot to score history
         let mut score_history: Vec<ScoreEntry> = env
@@ -280,11 +286,17 @@ impl Lifecycle {
         env.storage()
             .persistent()
             .set(&score_history_key(asset_id), &score_history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&score_history_key(asset_id), 518400, 518400);
 
         // Update last maintenance timestamp for decay tracking
         env.storage()
             .persistent()
             .set(&last_update_key(asset_id), &timestamp);
+        env.storage()
+            .persistent()
+            .extend_ttl(&last_update_key(asset_id), 518400, 518400);
 
         // Emit maintenance submission event
         env.events().publish(
@@ -368,9 +380,13 @@ impl Lifecycle {
         }
 
         env.storage().persistent().set(&history_key(asset_id), &history);
+        env.storage().persistent().extend_ttl(&history_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&score_key(asset_id), &score);
+        env.storage().persistent().extend_ttl(&score_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&score_history_key(asset_id), &score_history);
+        env.storage().persistent().extend_ttl(&score_history_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&last_update_key(asset_id), &timestamp);
+        env.storage().persistent().extend_ttl(&last_update_key(asset_id), 518400, 518400);
     }
 
     /// Apply time-based decay to an asset's collateral score.
@@ -413,7 +429,13 @@ impl Lifecycle {
             .set(&score_key(asset_id), &new_score);
         env.storage()
             .persistent()
+            .extend_ttl(&score_key(asset_id), 518400, 518400);
+        env.storage()
+            .persistent()
             .set(&last_update_key(asset_id), &current_time);
+        env.storage()
+            .persistent()
+            .extend_ttl(&last_update_key(asset_id), 518400, 518400);
 
         env.events().publish(
             (symbol_short!("DECAY"), asset_id),
@@ -628,6 +650,7 @@ impl Lifecycle {
         }
 
         env.storage().persistent().set(&score_key(asset_id), &0u32);
+        env.storage().persistent().extend_ttl(&score_key(asset_id), 518400, 518400);
 
         env.events().publish(
             (symbol_short!("RST_SCR"), asset_id),
@@ -1756,5 +1779,134 @@ mod tests {
         assert_eq!(client.get_maintenance_history_page(&asset_id, &10, &2).len(), 0);
         // limit=0 → empty
         assert_eq!(client.get_maintenance_history_page(&asset_id, &0, &0).len(), 0);
+    }
+
+    // --- Issue #207: decay_score extends TTL ---
+
+    #[test]
+    fn test_decay_score_extends_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("ENGINE"),
+            &String::from_str(&env, "Maintenance"),
+            &engineer,
+        );
+
+        let score_key = (symbol_short!("SCORE"), asset_id);
+        let last_update_key = (symbol_short!("LAST_UPD"), asset_id);
+
+        // Verify entries exist before decay
+        assert!(env.storage().persistent().has(&score_key));
+        assert!(env.storage().persistent().has(&last_update_key));
+
+        // Call decay_score
+        client.decay_score(&asset_id);
+
+        // Verify entries still exist after decay (TTL was extended)
+        assert!(env.storage().persistent().has(&score_key));
+        assert!(env.storage().persistent().has(&last_update_key));
+    }
+
+    // --- Issue #208: submit_maintenance extends TTL ---
+
+    #[test]
+    fn test_submit_maintenance_extends_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        let history_key = (symbol_short!("HIST"), asset_id);
+        let score_key = (symbol_short!("SCORE"), asset_id);
+        let score_history_key = (symbol_short!("SCOR_HST"), asset_id);
+        let last_update_key = (symbol_short!("LAST_UPD"), asset_id);
+
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("ENGINE"),
+            &String::from_str(&env, "Maintenance"),
+            &engineer,
+        );
+
+        // Verify all keys exist and TTL was extended
+        assert!(env.storage().persistent().has(&history_key));
+        assert!(env.storage().persistent().has(&score_key));
+        assert!(env.storage().persistent().has(&score_history_key));
+        assert!(env.storage().persistent().has(&last_update_key));
+    }
+
+    // --- Issue #209: batch_submit_maintenance extends TTL ---
+
+    #[test]
+    fn test_batch_submit_maintenance_extends_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        let history_key = (symbol_short!("HIST"), asset_id);
+        let score_key = (symbol_short!("SCORE"), asset_id);
+        let score_history_key = (symbol_short!("SCOR_HST"), asset_id);
+        let last_update_key = (symbol_short!("LAST_UPD"), asset_id);
+
+        let mut records = Vec::new(&env);
+        records.push_back(BatchRecord {
+            task_type: symbol_short!("OIL_CHG"),
+            notes: String::from_str(&env, "Oil change"),
+        });
+        records.push_back(BatchRecord {
+            task_type: symbol_short!("INSPECT"),
+            notes: String::from_str(&env, "Inspection"),
+        });
+
+        client.batch_submit_maintenance(&asset_id, &records, &engineer);
+
+        // Verify all keys exist and TTL was extended
+        assert!(env.storage().persistent().has(&history_key));
+        assert!(env.storage().persistent().has(&score_key));
+        assert!(env.storage().persistent().has(&score_history_key));
+        assert!(env.storage().persistent().has(&last_update_key));
+    }
+
+    // --- Issue #210: reset_score extends TTL ---
+
+    #[test]
+    fn test_reset_score_extends_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("ENGINE"),
+            &String::from_str(&env, "Maintenance"),
+            &engineer,
+        );
+
+        let score_key = (symbol_short!("SCORE"), asset_id);
+
+        // Verify entry exists before reset
+        assert!(env.storage().persistent().has(&score_key));
+
+        // Call reset_score
+        client.reset_score(&admin, &asset_id);
+
+        // Verify entry still exists after reset (TTL was extended)
+        assert!(env.storage().persistent().has(&score_key));
+        assert_eq!(client.get_collateral_score(&asset_id), 0);
     }
 }
