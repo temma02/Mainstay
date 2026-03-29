@@ -368,9 +368,13 @@ impl Lifecycle {
         }
 
         env.storage().persistent().set(&history_key(asset_id), &history);
+        env.storage().persistent().extend_ttl(&history_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&score_key(asset_id), &score);
+        env.storage().persistent().extend_ttl(&score_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&score_history_key(asset_id), &score_history);
+        env.storage().persistent().extend_ttl(&score_history_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&last_update_key(asset_id), &timestamp);
+        env.storage().persistent().extend_ttl(&last_update_key(asset_id), 518400, 518400);
     }
 
     /// Apply time-based decay to an asset's collateral score.
@@ -1726,6 +1730,31 @@ mod tests {
 
         let score_history = client.get_score_history(&asset_id);
         assert_eq!(score_history.len(), 3, "score_history length must match batch record count");
+    }
+
+    #[test]
+    fn test_batch_submit_extends_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        let mut records = Vec::new(&env);
+        records.push_back(BatchRecord {
+            task_type: symbol_short!("OIL_CHG"),
+            notes: String::from_str(&env, "ttl test"),
+        });
+        client.batch_submit_maintenance(&asset_id, &records, &engineer);
+
+        let contract_id = client.address.clone();
+        env.as_contract(&contract_id, || {
+            assert!(env.storage().persistent().get_ttl(&history_key(asset_id)) > 0);
+            assert!(env.storage().persistent().get_ttl(&score_key(asset_id)) > 0);
+            assert!(env.storage().persistent().get_ttl(&score_history_key(asset_id)) > 0);
+            assert!(env.storage().persistent().get_ttl(&last_update_key(asset_id)) > 0);
+        });
     }
 
     #[test]
