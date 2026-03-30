@@ -69,6 +69,13 @@ const DEFAULT_DECAY_INTERVAL: u64 = 2592000; // 30 days in seconds
 const DEFAULT_ELIGIBILITY_THRESHOLD: u32 = 50;
 const DEFAULT_MAX_NOTES_LENGTH: u32 = 256;
 
+const EVENT_INIT: Symbol = symbol_short!("INIT");
+const EVENT_MAINT: Symbol = symbol_short!("MAINT");
+const EVENT_DECAY: Symbol = symbol_short!("DECAY");
+const EVENT_REG_AST: Symbol = symbol_short!("REG_AST");
+const EVENT_REG_ENG: Symbol = symbol_short!("REG_ENG");
+const EVENT_RST_SCR: Symbol = symbol_short!("RST_SCR");
+
 fn history_key(asset_id: u64) -> (Symbol, u64) {
     (symbol_short!("HIST"), asset_id)
 }
@@ -483,7 +490,7 @@ impl Lifecycle {
         env.storage().instance().set(&CONFIG, &config);
 
         env.events().publish(
-            (symbol_short!("UPD_MAX_HIST"), admin),
+            (symbol_short!("UPD_MAX"), admin),
             new_max,
         );
     }
@@ -959,7 +966,7 @@ impl Lifecycle {
     ///
     /// # Returns
     /// Vec containing the requested page of asset IDs
-    pub fn get_engineer_maintenance_history_page(
+    pub fn get_eng_history_page(
         env: Env,
         engineer: Address,
         offset: u32,
@@ -1306,9 +1313,6 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let engineer = Address::generate(&env);
-        // Fill to cap
-for _ in 0..3 {
         let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 3);
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
@@ -2108,9 +2112,12 @@ for _ in 0..3 {
 
         let events = env.events().all();
         assert_eq!(events.len(), 2); // init + upgrade
-        let upgrade_event = &events[1];
-        assert_eq!(upgrade_event.0, (symbol_short!("UPGRADE"), admin));
-        assert_eq!(upgrade_event.1, new_wasm_hash);
+        let (_, topics, data) = events.get(1).unwrap();
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("UPGRADE"));
+        let emitted_hash: BytesN<32> = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_hash, new_wasm_hash);
     }
 
     // --- Score history tests ---
@@ -2481,8 +2488,8 @@ for _ in 0..3 {
         client.batch_submit_maintenance(&asset_id, &records, &engineer);
 
         // Verify engineer history contains asset_id only once
-        let history = client.get_engineer_history(&engineer);
-        let asset_count = history.iter().filter(|&id| *id == asset_id).count();
+        let history = client.get_engineer_maintenance_history(&engineer);
+        let asset_count = history.iter().filter(|id| *id == asset_id).count();
         assert_eq!(asset_count, 1);
     }
 
@@ -2737,6 +2744,103 @@ for _ in 0..3 {
             &String::from_str(&env, "Post-expiry attempt"),
             &engineer,
         );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedEngineer as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_submit_maintenance_rejects_expired_credential_via_cross_contract_call() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+
+        // Initialize asset registry and register asset
+        let asset_admin = Address::generate(&env);
+        asset_registry_client.initialize_admin(&asset_admin);
+        asset_registry_client.add_asset_type(&asset_admin, &symbol_short!("GENSET"));
+        let owner = Address::generate(&env);
+        let asset_id = asset_registry_client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "Test Generator"),
+            &owner,
+        );
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let eng_admin = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        engineer_registry_client.initialize_admin(&eng_admin);
+        engineer_registry_client.add_trusted_issuer(&eng_admin, &issuer);
+        // Register with validity_period = 100 seconds
+        engineer_registry_client.register_engineer(&engineer, &hash, &issuer, &100);
+
+        assert!(engineer_registry_client.verify_engineer(&engineer));
+
+        // Advance ledger by 101 seconds — credential is now expired
+        env.ledger().with_mut(|li| li.timestamp += 101);
+
+        assert!(!engineer_registry_client.verify_engineer(&engineer));
+
+        let result = client.try_submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "Post-expiry attempt"),
+            &engineer,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedEngineer as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_batch_submit_maintenance_rejects_expired_credential_via_cross_contract_call() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+
+        // Initialize asset registry and register asset
+        let asset_admin = Address::generate(&env);
+        asset_registry_client.initialize_admin(&asset_admin);
+        asset_registry_client.add_asset_type(&asset_admin, &symbol_short!("GENSET"));
+        let owner = Address::generate(&env);
+        let asset_id = asset_registry_client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "Test Generator"),
+            &owner,
+        );
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let eng_admin = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        engineer_registry_client.initialize_admin(&eng_admin);
+        engineer_registry_client.add_trusted_issuer(&eng_admin, &issuer);
+        // Register with validity_period = 100 seconds
+        engineer_registry_client.register_engineer(&engineer, &hash, &issuer, &100);
+
+        assert!(engineer_registry_client.verify_engineer(&engineer));
+
+        // Advance ledger by 101 seconds — credential is now expired
+        env.ledger().with_mut(|li| li.timestamp += 101);
+
+        assert!(!engineer_registry_client.verify_engineer(&engineer));
+
+        let mut records = Vec::new(&env);
+        records.push_back(BatchRecord {
+            task_type: symbol_short!("OIL_CHG"),
+            notes: String::from_str(&env, "Post-expiry batch attempt"),
+        });
+
+        let result = client.try_batch_submit_maintenance(&asset_id, &records, &engineer);
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
@@ -3174,15 +3278,15 @@ for _ in 0..3 {
         }
 
         // First page: offset=0, limit=2 → 2 assets
-        assert_eq!(client.get_engineer_maintenance_history_page(&engineer, &0, &2).len(), 2);
+        assert_eq!(client.get_eng_history_page(&engineer, &0, &2).len(), 2);
         // Second page: offset=2, limit=2 → 2 assets
-        assert_eq!(client.get_engineer_maintenance_history_page(&engineer, &2, &2).len(), 2);
+        assert_eq!(client.get_eng_history_page(&engineer, &2, &2).len(), 2);
         // Third page: offset=4, limit=2 → 1 asset (only one left)
-        assert_eq!(client.get_engineer_maintenance_history_page(&engineer, &4, &2).len(), 1);
+        assert_eq!(client.get_eng_history_page(&engineer, &4, &2).len(), 1);
         // Out-of-bounds offset → empty
-        assert_eq!(client.get_engineer_maintenance_history_page(&engineer, &10, &2).len(), 0);
+        assert_eq!(client.get_eng_history_page(&engineer, &10, &2).len(), 0);
         // limit=0 → empty
-        assert_eq!(client.get_engineer_maintenance_history_page(&engineer, &0, &0).len(), 0);
+        assert_eq!(client.get_eng_history_page(&engineer, &0, &0).len(), 0);
     }
 
     // --- Issue #207: decay_score extends TTL ---
