@@ -1883,6 +1883,39 @@ for _ in 0..3 {
     }
 
     #[test]
+    fn test_full_cross_contract_threshold_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Set eligibility threshold to a deterministic value for boundary testing.
+        client.update_eligibility_threshold(&admin, &10);
+
+        // Just below threshold: one maintenance event (FILTER = 5 points)
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("FILTER"),
+            &String::from_str(&env, "Filter replacement 1"),
+            &engineer,
+        );
+        assert_eq!(client.get_collateral_score(&asset_id), 5);
+        assert!(!client.is_collateral_eligible(&asset_id));
+
+        // Cross threshold with one more event (total = 10)
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("FILTER"),
+            &String::from_str(&env, "Filter replacement 2"),
+            &engineer,
+        );
+        assert_eq!(client.get_collateral_score(&asset_id), 10);
+        assert!(client.is_collateral_eligible(&asset_id));
+    }
+
+    #[test]
     fn test_update_eligibility_threshold_non_admin_rejected() {
         let env = Env::default();
         env.mock_all_auths();
