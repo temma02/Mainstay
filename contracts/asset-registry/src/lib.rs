@@ -1499,4 +1499,19 @@ mod tests {
         // Asset must still exist
         assert!(client.asset_exists(&id));
     }
+
+    #[test]
+    fn test_deregister_nonexistent_asset_returns_structured_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        assert_eq!(
+            client.try_deregister_asset(&9999u64),
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::AssetNotFound as u32
+            )))
+        );
+    }
 }
