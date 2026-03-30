@@ -656,6 +656,9 @@ impl Lifecycle {
         env.storage()
             .persistent()
             .set(&score_history_key(asset_id), &score_history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&score_history_key(asset_id), 518400, 518400);
 
         env.events().publish(
             (symbol_short!("DECAY"), asset_id),
