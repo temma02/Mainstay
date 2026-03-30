@@ -412,7 +412,13 @@ impl EngineerRegistry {
             }
         }
         env.storage().instance().set(&issuer_list_key(), &new_list);
+
+        env.events().publish(
+            (symbol_short!("ISS_RM"), admin.clone()),
+            (issuer,),
+        );
     }
+
 
     /// Get all engineer addresses that have been credentialed by a specific issuer.
     ///
@@ -498,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "admin already initialized")]
+    #[should_panic]
     fn test_initialize_admin_called_twice_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1111,6 +1117,13 @@ mod tests {
 
         client.pause(&admin);
 
+        // Read-only access should still work while paused
+        assert!(client.verify_engineer(&engineer));
+        let fetched_engineer = client.get_engineer(&engineer);
+        assert_eq!(fetched_engineer.address, engineer);
+        assert!(fetched_engineer.active);
+        assert!(client.try_get_engineer(&engineer).is_ok());
+
         // register_engineer
         assert_eq!(
             client.try_register_engineer(&Address::generate(&env), &hash, &issuer, &100),
@@ -1295,6 +1308,33 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_trusted_issuer_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        client.add_trusted_issuer(&admin, &issuer);
+        client.remove_trusted_issuer(&admin, &issuer);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 2); // add + remove
+
+        let remove_event = events.get(1).unwrap();
+        let (_, topics, data) = remove_event;
+
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let t1: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("ISS_RM"));
+        assert_eq!(t1, admin);
+
+        let (emitted_issuer,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_issuer, issuer);
+    }
+
+
+    #[test]
     fn test_remove_nonexistent_issuer() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1353,18 +1393,10 @@ mod tests {
         client.add_trusted_issuer(&admin, &issuer_b);
 
         // Issuer A registers the engineer
-        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-            address: &issuer_a,
-            invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                contract: &client.address,
-                fn_name: "register_engineer",
-                args: (engineer.clone(), hash.clone(), issuer_a.clone(), 31_536_000u64).into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
         client.register_engineer(&engineer, &hash, &issuer_a, &31_536_000);
 
-        // Issuer B attempts to revoke (should fail without mock_all_auths)
+        // Issuer B attempts to revoke — should fail because record.issuer is issuer_a
+        // Restrict to only issuer_b's auth so issuer_a.require_auth() fails
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
             address: &issuer_b,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {

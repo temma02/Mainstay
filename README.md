@@ -3,6 +3,7 @@
 [![CI](https://github.com/marvs8/Mainstay/actions/workflows/ci.yml/badge.svg)](https://github.com/marvs8/Mainstay/actions/workflows/ci.yml)
 [![Clippy](https://img.shields.io/badge/clippy-passing-brightgreen)](https://github.com/marvs8/Mainstay/actions/workflows/ci.yml)
 [![rustfmt](https://img.shields.io/badge/rustfmt-passing-brightgreen)](https://github.com/marvs8/Mainstay/actions/workflows/ci.yml)
+[![cargo audit](https://img.shields.io/badge/cargo%20audit-high--severity%20gate-blue)](https://github.com/marvs8/Mainstay/actions/workflows/ci.yml)
 
 A decentralized physical infrastructure network (DePIN) built on Stellar Soroban smart contracts, creating verifiable maintenance audit trails for heavy industrial machinery.
 
@@ -50,7 +51,7 @@ This makes Mainstay:
 
 ### Test
 
-From the repository root, run the full workspace test suite (same as CI):
+From the repository root, run the full workspace test suite:
 
 ```bash
 ./scripts/test.sh
@@ -61,6 +62,13 @@ Optional arguments are forwarded to `cargo test`, for example:
 ```bash
 ./scripts/test.sh -p lifecycle
 ./scripts/test.sh -p lifecycle my_test_name -- --nocapture
+```
+
+To run the dependency audit gate used by CI:
+
+```bash
+cargo install cargo-audit --locked
+cargo audit
 ```
 
 On Windows (PowerShell):
@@ -243,7 +251,7 @@ We take the security of Mainstay very seriously. If you discover a vulnerability
 
 ### Dependency Vulnerability Scanning
 - **Automated Scanning**: CI workflow runs `cargo audit` on every push and PR
-- **Failure Handling**: Build fails if high-severity vulnerabilities are detected
+- **Failure Handling**: Build fails if `cargo audit` finds advisories at `high` severity or above
 - **Purpose**: Automatically detect known vulnerabilities in Soroban SDK and dependencies
 - **Action Required**: Review and update dependencies if audit fails
 

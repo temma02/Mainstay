@@ -1,2 +1,26 @@
-/target
-TODO.md
+# Build artifacts
+target/
+
+# Environment secrets
+.env
+
+# Test snapshots
+contracts/asset-registry/test_snapshots/
+contracts/lifecycle/test_snapshots/
+contracts/engineer-registry/test_snapshots/
+**/*.snap
+
+# IDE / editor
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Wasm build output
+*.wasm
