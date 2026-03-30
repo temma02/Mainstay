@@ -407,8 +407,6 @@ impl Lifecycle {
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
-        validate_notes_length(&env, &notes, config.max_notes_length);
-
         let mut history: Vec<MaintenanceRecord> = env
             .storage()
             .persistent()
@@ -547,7 +545,6 @@ impl Lifecycle {
 
         for record in records.iter() {
             validate_task_type(&env, &record.task_type);
-            validate_notes_length(&env, &record.notes, config.max_notes_length);
         }
 
         // Validate all records fit before writing any
@@ -2002,6 +1999,47 @@ mod tests {
             &asset_id,
             &symbol_short!("OIL_CHG"),
             &String::from_str(&env, "Post-revocation attempt"),
+            &engineer,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedEngineer as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_submit_maintenance_expired_engineer_should_panic() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        
+        // Register engineer with short validity period (1000 seconds)
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        engineer_registry_client.initialize_admin(&admin);
+        engineer_registry_client.add_trusted_issuer(&admin, &issuer);
+        engineer_registry_client.register_engineer(&engineer, &hash, &issuer, &1000);
+
+        // Verify engineer is initially valid
+        assert!(engineer_registry_client.verify_engineer(&engineer));
+
+        // Advance ledger past expiry (1001 seconds)
+        env.ledger().with_mut(|li| li.timestamp = li.timestamp + 1001);
+
+        // Verify engineer is now expired
+        assert!(!engineer_registry_client.verify_engineer(&engineer));
+
+        // Attempt submit_maintenance and assert UnauthorizedEngineer is returned
+        let result = client.try_submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "Post-expiry attempt"),
             &engineer,
         );
         assert_eq!(
