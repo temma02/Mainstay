@@ -411,7 +411,13 @@ impl EngineerRegistry {
             }
         }
         env.storage().instance().set(&issuer_list_key(), &new_list);
+
+        env.events().publish(
+            (symbol_short!("ISS_RM"), admin.clone()),
+            (issuer,),
+        );
     }
+
 
     /// Get all engineer addresses that have been credentialed by a specific issuer.
     ///
@@ -1281,6 +1287,33 @@ mod tests {
         });
         assert!(ttl > 0, "TTL should be extended after renewal");
     }
+
+    #[test]
+    fn test_remove_trusted_issuer_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        client.add_trusted_issuer(&admin, &issuer);
+        client.remove_trusted_issuer(&admin, &issuer);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 2); // add + remove
+
+        let remove_event = events.get(1).unwrap();
+        let (_, topics, data) = remove_event;
+
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let t1: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("ISS_RM"));
+        assert_eq!(t1, admin);
+
+        let (emitted_issuer,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_issuer, issuer);
+    }
+
 
     #[test]
     fn test_remove_nonexistent_issuer() {
