@@ -37,6 +37,7 @@ fn engineer_key(addr: &Address) -> (Symbol, Address) {
 }
 
 const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
+const REG_ENG_TOPIC: Symbol = symbol_short!("REG_ENG");
 
 fn is_paused(env: &Env) -> bool {
     env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
@@ -141,8 +142,8 @@ impl EngineerRegistry {
 
         // Emit engineer registration event
         env.events().publish(
-            (symbol_short!("REG_ENG"), engineer.clone()),
-            (issuer, credential_hash.clone(), now),
+            (REG_ENG_TOPIC, engineer.clone()),
+            (issuer, credential_hash.clone(), now, now + validity_period),
         );
     }
 
@@ -543,13 +544,28 @@ mod tests {
         let engineer = Address::generate(&env);
         let issuer = Address::generate(&env);
         let hash = BytesN::from_array(&env, &[1u8; 32]);
+        let validity_period: u64 = 31_536_000;
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+        let issued_at = env.ledger().timestamp();
+        client.register_engineer(&engineer, &hash, &issuer, &validity_period);
 
-        // Verify registration event was emitted
+        // ISS_ADD event fires first, REG_ENG is the second event
         let events = env.events().all();
-        assert!(events.len() > 0);
+        let (_, topics, data) = events.last().unwrap();
+
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let t1: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, REG_ENG_TOPIC);
+        assert_eq!(t1, engineer);
+
+        let (emitted_issuer, emitted_hash, emitted_issued_at, emitted_expires_at):
+            (Address, BytesN<32>, u64, u64) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_issuer, issuer);
+        assert_eq!(emitted_hash, hash);
+        assert_eq!(emitted_issued_at, issued_at);
+        assert_eq!(emitted_expires_at, issued_at + validity_period);
     }
 
     #[test]
@@ -735,6 +751,12 @@ mod tests {
 
         let events = env.events().all();
         assert_eq!(events.len(), 1); // upgrade event
+        let (_, topics, data) = events.get(0).unwrap();
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("UPGRADE"));
+        let emitted_hash: BytesN<32> = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_hash, new_wasm_hash);
     }
 
     // --- get_engineers_by_issuer tests ---
@@ -1384,7 +1406,9 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-
+        
+        // This should panic because issuer_b is not the original issuer
+        // The require_auth will fail because record.issuer is issuer_a, not issuer_b
         let result = client.try_revoke_credential(&engineer);
         assert!(result.is_err(), "Different issuer should not be able to revoke");
     }
