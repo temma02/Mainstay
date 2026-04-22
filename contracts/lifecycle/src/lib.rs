@@ -239,6 +239,14 @@ fn validate_notes_length(env: &Env, notes: &soroban_sdk::String, max: u32) {
     }
 }
 
+fn verify_asset_exists(env: &Env, asset_registry: &Address, asset_id: &u64) {
+    let client = asset_registry::AssetRegistryClient::new(env, asset_registry);
+    let result = client.try_get_asset(asset_id);
+    if result.is_err() {
+        panic_with_error!(env, ContractError::AssetNotFound);
+    }
+}
+
 // Minimal client interface for cross-contract call to EngineerRegistry
 mod engineer_registry {
     use soroban_sdk::{contractclient, Address, Env};
@@ -534,9 +542,7 @@ impl Lifecycle {
             .instance()
             .get(&ASSET_REGISTRY)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        let asset_registry_client =
-            asset_registry::AssetRegistryClient::new(&env, &asset_registry);
-        asset_registry_client.get_asset(&asset_id);
+        verify_asset_exists(&env, &asset_registry, &asset_id);
 
         // Cross-check engineer credential
         let registry_id: Address = env
@@ -640,8 +646,7 @@ impl Lifecycle {
             .instance()
             .get(&ASSET_REGISTRY)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        let asset_registry_client = asset_registry::AssetRegistryClient::new(&env, &asset_registry);
-        asset_registry_client.get_asset(&asset_id);
+        verify_asset_exists(&env, &asset_registry, &asset_id);
 
         // Validate engineer credential
         let engineer_registry: Address = env
@@ -1300,7 +1305,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_submit_maintenance_nonexistent_asset() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1308,11 +1312,18 @@ mod tests {
         let (client, _, engineer_registry_client, _) = setup(&env, 0);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        client.submit_maintenance(
+        let result = client.try_submit_maintenance(
             &999u64,
             &symbol_short!("OIL_CHG"),
             &String::from_str(&env, "Should fail"),
             &engineer,
+        );
+
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::AssetNotFound as u32,
+            ))),
         );
     }
 
