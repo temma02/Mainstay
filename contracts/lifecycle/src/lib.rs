@@ -849,9 +849,7 @@ impl Lifecycle {
             .instance()
             .get(&ASSET_REGISTRY)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        let asset_registry_client =
-            asset_registry::AssetRegistryClient::new(&env, &asset_registry);
-        asset_registry_client.get_asset(&asset_id);
+        verify_asset_exists(&env, &asset_registry, &asset_id);
         apply_decay(&env, asset_id, false, false)
     }
 
