@@ -20,6 +20,7 @@ pub enum ContractError {
     EngineerAlreadyRegistered = 10,
     IssuerNotFound = 11,
     PendingAdminAlreadyExists = 12,
+    InvalidValidityPeriod = 13,
 }
 
 #[contracttype]
@@ -49,6 +50,7 @@ fn engineer_key(addr: &Address) -> (Symbol, Address) {
 const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
 const REG_ENG_TOPIC: Symbol = symbol_short!("REG_ENG");
 const REVOKE_TOPIC: Symbol = symbol_short!("REV_CRED");
+const MIN_VALIDITY_PERIOD: u64 = 86_400;
 
 fn is_paused(env: &Env) -> bool {
     env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
@@ -113,14 +115,18 @@ impl EngineerRegistry {
         if credential_hash == BytesN::from_array(&env, &[0u8; 32]) {
             panic_with_error!(&env, ContractError::InvalidCredentialHash);
         }
-        
+
         // Check if engineer already has an active record
-        if let Some(existing) = env.storage().persistent().get::<_, Engineer>(&engineer_key(&engineer)) {
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<_, Engineer>(&engineer_key(&engineer))
+        {
             if existing.active {
                 panic_with_error!(&env, ContractError::EngineerAlreadyRegistered);
             }
         }
-        
+
         let now = env.ledger().timestamp();
         let record = Engineer {
             address: engineer.clone(),
@@ -199,7 +205,9 @@ impl EngineerRegistry {
             panic_with_error!(&env, ContractError::CredentialAlreadyRevoked);
         }
         // Extend TTL before write to ensure consistency even on near-expired entries
-        env.storage().persistent().extend_ttl(&engineer_key(&engineer), 518400, 518400);
+        env.storage()
+            .persistent()
+            .extend_ttl(&engineer_key(&engineer), 518400, 518400);
         record.active = false;
         env.storage()
             .persistent()
@@ -236,6 +244,9 @@ impl EngineerRegistry {
         if !record.active {
             panic_with_error!(&env, ContractError::CredentialRevoked);
         }
+        if new_validity_period < MIN_VALIDITY_PERIOD {
+            panic_with_error!(&env, ContractError::InvalidValidityPeriod);
+        }
         let renewed_at = env.ledger().timestamp();
         let previous_expires_at = record.expires_at;
         let renewal_base = if previous_expires_at > renewed_at {
@@ -244,8 +255,12 @@ impl EngineerRegistry {
             renewed_at
         };
         record.expires_at = renewal_base + new_validity_period;
-        env.storage().persistent().extend_ttl(&engineer_key(&engineer), 518400, 518400);
-        env.storage().persistent().set(&engineer_key(&engineer), &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&engineer_key(&engineer), 518400, 518400);
+        env.storage()
+            .persistent()
+            .set(&engineer_key(&engineer), &record);
 
         env.events().publish(
             (symbol_short!("RNW_CRED"), engineer.clone()),
@@ -326,7 +341,9 @@ impl EngineerRegistry {
     /// # Panics
     /// - [`ContractError::NotInitialized`] if the admin has not been initialized
     pub fn get_admin(env: Env) -> Address {
-        env.storage().instance().get(&admin_key())
+        env.storage()
+            .instance()
+            .get(&admin_key())
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
     }
 
@@ -349,7 +366,9 @@ impl EngineerRegistry {
         if env.storage().instance().has(&pending_admin_key()) {
             panic_with_error!(&env, ContractError::PendingAdminAlreadyExists);
         }
-        env.storage().instance().set(&pending_admin_key(), &new_admin);
+        env.storage()
+            .instance()
+            .set(&pending_admin_key(), &new_admin);
     }
 
     /// Accept the admin transfer (step 2 of 2-step transfer).
@@ -438,22 +457,27 @@ impl EngineerRegistry {
     pub fn add_trusted_issuer(env: Env, admin: Address, issuer: Address) {
         ensure_not_paused(&env);
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&admin_key())
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&admin_key())
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
         env.storage().instance().set(&trusted_key(&issuer), &());
-        let mut list: Vec<Address> = env.storage().instance().get(&issuer_list_key()).unwrap_or(Vec::new(&env));
+        let mut list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&issuer_list_key())
+            .unwrap_or(Vec::new(&env));
         if !list.contains(issuer.clone()) {
             list.push_back(issuer.clone());
         }
         env.storage().instance().set(&issuer_list_key(), &list);
 
-        env.events().publish(
-            (symbol_short!("ISS_ADD"), admin),
-            (issuer,),
-        );
+        env.events()
+            .publish((symbol_short!("ISS_ADD"), admin), (issuer,));
     }
 
     /// Admin-only function to remove a trusted issuer.
@@ -469,19 +493,26 @@ impl EngineerRegistry {
     pub fn remove_trusted_issuer(env: Env, admin: Address, issuer: Address) {
         ensure_not_paused(&env);
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&admin_key())
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&admin_key())
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
-        
+
         // Check if issuer exists before removing
         if !env.storage().instance().has(&trusted_key(&issuer)) {
             panic_with_error!(&env, ContractError::IssuerNotFound);
         }
-        
+
         env.storage().instance().remove(&trusted_key(&issuer));
-        let list: Vec<Address> = env.storage().instance().get(&issuer_list_key()).unwrap_or(Vec::new(&env));
+        let list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&issuer_list_key())
+            .unwrap_or(Vec::new(&env));
         let mut new_list: Vec<Address> = Vec::new(&env);
         for addr in list.iter() {
             if addr != issuer {
@@ -490,12 +521,9 @@ impl EngineerRegistry {
         }
         env.storage().instance().set(&issuer_list_key(), &new_list);
 
-        env.events().publish(
-            (symbol_short!("ISS_RM"), admin.clone()),
-            (issuer,),
-        );
+        env.events()
+            .publish((symbol_short!("ISS_RM"), admin.clone()), (issuer,));
     }
-
 
     /// Get all engineer addresses that have been credentialed by a specific issuer.
     /// This includes both active and revoked engineers (historical registry).
@@ -534,7 +562,10 @@ impl EngineerRegistry {
         ensure_not_paused(&env);
         admin.require_auth();
 
-        let stored_admin: Address = env.storage().instance().get(&admin_key())
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&admin_key())
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
@@ -556,8 +587,8 @@ impl EngineerRegistry {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::Address as _,
         testutils::storage::Persistent,
+        testutils::Address as _,
         testutils::{Events, Ledger},
         BytesN, Env, IntoVal,
     };
@@ -627,8 +658,12 @@ mod tests {
         assert_eq!(t0, REG_ENG_TOPIC);
         assert_eq!(t1, engineer);
 
-        let (emitted_issuer, emitted_hash, emitted_issued_at, emitted_expires_at):
-            (Address, BytesN<32>, u64, u64) = data.try_into_val(&env).unwrap();
+        let (emitted_issuer, emitted_hash, emitted_issued_at, emitted_expires_at): (
+            Address,
+            BytesN<32>,
+            u64,
+            u64,
+        ) = data.try_into_val(&env).unwrap();
         assert_eq!(emitted_issuer, issuer);
         assert_eq!(emitted_hash, hash);
         assert_eq!(emitted_issued_at, issued_at);
@@ -666,6 +701,29 @@ mod tests {
     }
 
     #[test]
+    fn test_revoke_already_revoked_returns_structured_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+        client.revoke_credential(&engineer);
+
+        let result = client.try_revoke_credential(&engineer);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::CredentialAlreadyRevoked as u32
+            )))
+        );
+    }
+
+    #[test]
     fn test_initialize_admin_double_call_rejected() {
         let env = Env::default();
         env.mock_all_auths();
@@ -695,7 +753,7 @@ mod tests {
         let admin = Address::generate(&env);
         // This should succeed because we mock all auths
         client.initialize_admin(&admin);
-        
+
         // Verify admin was set
         assert_eq!(client.get_admin(), admin);
     }
@@ -853,6 +911,22 @@ mod tests {
     }
 
     #[test]
+    fn test_pending_admin_key_cleared_after_accept() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin();
+
+        let contract_id = client.address.clone();
+        env.as_contract(&contract_id, || {
+            assert!(!env.storage().instance().has(&pending_admin_key()));
+        });
+    }
+
+    #[test]
     fn test_non_admin_cannot_propose_admin() {
         let env = Env::default();
         env.mock_all_auths();
@@ -939,9 +1013,24 @@ mod tests {
         let e3 = Address::generate(&env);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer, &31_536_000);
-        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer, &31_536_000);
-        client.register_engineer(&e3, &BytesN::from_array(&env, &[3u8; 32]), &issuer, &31_536_000);
+        client.register_engineer(
+            &e1,
+            &BytesN::from_array(&env, &[1u8; 32]),
+            &issuer,
+            &31_536_000,
+        );
+        client.register_engineer(
+            &e2,
+            &BytesN::from_array(&env, &[2u8; 32]),
+            &issuer,
+            &31_536_000,
+        );
+        client.register_engineer(
+            &e3,
+            &BytesN::from_array(&env, &[3u8; 32]),
+            &issuer,
+            &31_536_000,
+        );
 
         let list = client.get_engineers_by_issuer(&issuer);
         assert_eq!(list.len(), 3);
@@ -960,8 +1049,18 @@ mod tests {
 
         client.add_trusted_issuer(&admin, &issuer_a);
         client.add_trusted_issuer(&admin, &issuer_b);
-        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer_a, &31_536_000);
-        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer_b, &31_536_000);
+        client.register_engineer(
+            &e1,
+            &BytesN::from_array(&env, &[1u8; 32]),
+            &issuer_a,
+            &31_536_000,
+        );
+        client.register_engineer(
+            &e2,
+            &BytesN::from_array(&env, &[2u8; 32]),
+            &issuer_b,
+            &31_536_000,
+        );
 
         assert_eq!(client.get_engineers_by_issuer(&issuer_a).len(), 1);
         assert_eq!(client.get_engineers_by_issuer(&issuer_b).len(), 1);
@@ -989,10 +1088,20 @@ mod tests {
         assert_eq!(client.get_engineer_count_by_issuer(&issuer), 0);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer, &31_536_000);
+        client.register_engineer(
+            &e1,
+            &BytesN::from_array(&env, &[1u8; 32]),
+            &issuer,
+            &31_536_000,
+        );
         assert_eq!(client.get_engineer_count_by_issuer(&issuer), 1);
 
-        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer, &31_536_000);
+        client.register_engineer(
+            &e2,
+            &BytesN::from_array(&env, &[2u8; 32]),
+            &issuer,
+            &31_536_000,
+        );
         assert_eq!(client.get_engineer_count_by_issuer(&issuer), 2);
     }
 
@@ -1056,7 +1165,8 @@ mod tests {
         assert!(client.verify_engineer(&engineer));
 
         // Advance ledger past expiry
-        env.ledger().with_mut(|li| li.timestamp = li.timestamp + 1001);
+        env.ledger()
+            .with_mut(|li| li.timestamp = li.timestamp + 1001);
         assert!(!client.verify_engineer(&engineer));
     }
 
@@ -1074,7 +1184,8 @@ mod tests {
         client.register_engineer(&engineer, &hash, &issuer, &1000);
 
         // Advance to just before expiry
-        env.ledger().with_mut(|li| li.timestamp = li.timestamp + 999);
+        env.ledger()
+            .with_mut(|li| li.timestamp = li.timestamp + 999);
         assert!(client.verify_engineer(&engineer));
     }
 
@@ -1211,37 +1322,49 @@ mod tests {
         // register_engineer
         assert_eq!(
             client.try_register_engineer(&Address::generate(&env), &hash, &issuer, &100),
-            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32
+            )))
         );
 
         // revoke_credential
         assert_eq!(
             client.try_revoke_credential(&engineer),
-            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32
+            )))
         );
 
         // add_trusted_issuer
         assert_eq!(
             client.try_add_trusted_issuer(&admin, &Address::generate(&env)),
-            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32
+            )))
         );
 
         // remove_trusted_issuer
         assert_eq!(
             client.try_remove_trusted_issuer(&admin, &issuer),
-            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32
+            )))
         );
 
         // upgrade
         assert_eq!(
             client.try_upgrade(&admin, &BytesN::from_array(&env, &[0u8; 32])),
-            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32
+            )))
         );
 
         // renew_credential
         assert_eq!(
             client.try_renew_credential(&engineer, &31_536_000),
-            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32
+            )))
         );
     }
 
@@ -1258,18 +1381,41 @@ mod tests {
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&engineer, &hash, &issuer, &1000);
+        client.register_engineer(&engineer, &hash, &issuer, &86_400);
 
         // Advance past original expiry
-        env.ledger().with_mut(|li| li.timestamp = li.timestamp + 1001);
+        env.ledger()
+            .with_mut(|li| li.timestamp = li.timestamp + 1001);
         assert!(!client.verify_engineer(&engineer));
 
-        // Renew for another 1000 seconds from now
-        client.renew_credential(&engineer, &1000);
+        // Renew for another 86_400 seconds from now
+        client.renew_credential(&engineer, &86_400);
         assert!(client.verify_engineer(&engineer));
 
         let record = client.get_engineer(&engineer);
-        assert_eq!(record.expires_at, env.ledger().timestamp() + 1000);
+        assert_eq!(record.expires_at, env.ledger().timestamp() + 86_400);
+    }
+
+    #[test]
+    fn test_renew_credential_short_validity_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+
+        let result = client.try_renew_credential(&engineer, &1);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidValidityPeriod as u32,
+            ))),
+        );
     }
 
     #[test]
@@ -1362,8 +1508,12 @@ mod tests {
         assert_eq!(t1, engineer);
 
         let renewed_at = env.ledger().timestamp();
-        let (emitted_issuer, old_expires_at, new_expires_at, emitted_renewed_at): (Address, u64, u64, u64) =
-            data.try_into_val(&env).unwrap();
+        let (emitted_issuer, old_expires_at, new_expires_at, emitted_renewed_at): (
+            Address,
+            u64,
+            u64,
+            u64,
+        ) = data.try_into_val(&env).unwrap();
         assert_eq!(emitted_issuer, issuer);
         assert_eq!(old_expires_at, previous_expires_at);
         assert_eq!(new_expires_at, previous_expires_at + 2000);
@@ -1417,7 +1567,6 @@ mod tests {
         assert_eq!(emitted_issuer, issuer);
     }
 
-
     #[test]
     fn test_remove_nonexistent_issuer() {
         let env = Env::default();
@@ -1427,7 +1576,9 @@ mod tests {
 
         assert_eq!(
             client.try_remove_trusted_issuer(&admin, &nonexistent_issuer),
-            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::IssuerNotFound as u32)))
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::IssuerNotFound as u32
+            )))
         );
     }
 
@@ -1505,11 +1656,14 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        
+
         // This should panic because issuer_b is not the original issuer
         // The require_auth will fail because record.issuer is issuer_a, not issuer_b
         let result = client.try_revoke_credential(&engineer);
-        assert!(result.is_err(), "Different issuer should not be able to revoke");
+        assert!(
+            result.is_err(),
+            "Different issuer should not be able to revoke"
+        );
     }
 
     #[test]
@@ -1547,7 +1701,7 @@ mod tests {
 
         client.add_trusted_issuer(&admin, &issuer);
         client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
-        
+
         // Revoke the credential
         client.revoke_credential(&engineer);
         assert!(!client.verify_engineer(&engineer));
@@ -1571,7 +1725,10 @@ mod tests {
         client.add_trusted_issuer(&admin, &issuer);
         client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
 
-        assert_eq!(client.get_engineer_status(&engineer), EngineerStatus::Active);
+        assert_eq!(
+            client.get_engineer_status(&engineer),
+            EngineerStatus::Active
+        );
     }
 
     #[test]
@@ -1588,7 +1745,10 @@ mod tests {
         client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
         client.revoke_credential(&engineer);
 
-        assert_eq!(client.get_engineer_status(&engineer), EngineerStatus::Revoked);
+        assert_eq!(
+            client.get_engineer_status(&engineer),
+            EngineerStatus::Revoked
+        );
     }
 
     #[test]
@@ -1605,7 +1765,10 @@ mod tests {
         client.register_engineer(&engineer, &hash, &issuer, &100); // 100 seconds validity
         env.ledger().set_timestamp(200); // Move time forward
 
-        assert_eq!(client.get_engineer_status(&engineer), EngineerStatus::Expired);
+        assert_eq!(
+            client.get_engineer_status(&engineer),
+            EngineerStatus::Expired
+        );
     }
 
     #[test]
@@ -1615,7 +1778,10 @@ mod tests {
         let (client, _admin) = setup(&env);
 
         let engineer = Address::generate(&env);
-        assert_eq!(client.get_engineer_status(&engineer), EngineerStatus::NotFound);
+        assert_eq!(
+            client.get_engineer_status(&engineer),
+            EngineerStatus::NotFound
+        );
     }
 
     #[test]
@@ -1678,7 +1844,9 @@ mod tests {
 
         assert_eq!(
             client.try_propose_admin(&unauthorized, &new_admin),
-            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::UnauthorizedAdmin as u32)))
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedAdmin as u32
+            )))
         );
     }
 

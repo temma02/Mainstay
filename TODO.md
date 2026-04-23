@@ -1,9 +1,9 @@
-# Fix: remove_trusted_issuer does not emit an event
+# TODO: Fix #317 - renew_credential minimum validity period
 
-## Steps:
+- [x] Read and understand contract code and tests
+- [x] Add `InvalidValidityPeriod = 13` to `ContractError` enum
+- [x] Add `MIN_VALIDITY_PERIOD: u64 = 86_400` constant
+- [x] Add guard in `renew_credential` rejecting `new_validity_period < MIN_VALIDITY_PERIOD`
+- [x] Add test `test_renew_credential_short_validity_rejected`
+- [ ] Run `cargo test` to verify all tests pass
 
-- [x] 1. Edit contracts/engineer-registry/src/lib.rs: Add ISS_RM event publish to remove_trusted_issuer function
-- [x] 2. Edit contracts/engineer-registry/src/lib.rs: Add test_remove_trusted_issuer_emits_event test (both edits in parallel)
-- [x] 3. Run cargo test in contracts/engineer-registry/ to verify and generate snapshot (tests passed)
-- [x] 4. Update TODO.md with completion status
-- [x] 5. attempt_completion
