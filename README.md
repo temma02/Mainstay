@@ -120,6 +120,11 @@ stellar keys generate deployer --network testnet
 ./scripts/deploy_testnet.sh
 ```
 
+## 📋 Examples
+
+- [Credential Management (bash)](examples/credential_management.sh) — register, verify, renew, and revoke engineer credentials on Linux/macOS
+- [Credential Management (PowerShell)](examples/credential_management.ps1) — equivalent workflow for Windows users
+
 ## 📖 Documentation
 
 - [Architecture Overview](docs/architecture.md)

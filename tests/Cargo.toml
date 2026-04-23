@@ -1,0 +1,9 @@
+[package]
+name = "cross-platform-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[test]]
+name = "cross_platform_tests"
+path = "cross_platform_tests.rs"

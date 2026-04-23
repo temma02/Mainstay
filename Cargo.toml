@@ -3,6 +3,7 @@ members = [
     "contracts/asset-registry",
     "contracts/engineer-registry",
     "contracts/lifecycle",
+    "tests",
 ]
 resolver = "2"
 
