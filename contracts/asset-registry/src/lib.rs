@@ -18,6 +18,7 @@ pub enum ContractError {
     Paused = 7,
     InvalidAssetType = 8,
     PendingAdminAlreadyExists = 9,
+>>>>>>> origin/main
 }
 
 #[contracttype]
@@ -269,6 +270,14 @@ impl AssetRegistry {
                 .extend_ttl(&owner_index_key(&owner), 518400, 518400);
         }
 
+        // Emit batch registration event
+        if !ids.is_empty() {
+            env.events().publish(
+                (symbol_short!("BATCH_REG"), owner.clone()),
+                (ids.clone(), env.ledger().timestamp()),
+            );
+        }
+
         ids
     }
 
@@ -396,16 +405,22 @@ impl AssetRegistry {
     /// Accept the admin transfer (step 2 of 2-step transfer).
     /// Only the pending admin can accept and become the new admin.
     ///
+    /// # Arguments
+    /// * `new_admin` - The pending admin address
+    ///
     /// # Panics
     /// - [`ContractError::NotInitialized`] if no pending admin exists
     /// - [`ContractError::UnauthorizedAdmin`] if caller is not the pending admin
-    pub fn accept_admin(env: Env) {
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
         let pending_admin: Address = env
             .storage()
             .instance()
             .get(&PENDING_ADMIN_KEY)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        pending_admin.require_auth();
+        if pending_admin != new_admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
         env.storage().instance().set(&ADMIN_KEY, &pending_admin);
         env.storage().instance().remove(&PENDING_ADMIN_KEY);
     }
@@ -1862,6 +1877,29 @@ mod tests {
                 ContractError::DuplicateAsset as u32,
             ))),
         );
+    }
+
+    #[test]
+    fn test_batch_register_assets_emits_batch_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+        let mut batch = Vec::new(&env);
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "A") });
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "B") });
+
+        client.batch_register_assets(&owner, &batch);
+
+        // Check that batch event is emitted
+        let events = env.events().all();
+        assert_eq!(events.len(), 3); // 2 REG_AST + 1 BATCH_REG
     }
 
     #[test]
