@@ -195,6 +195,8 @@ impl AssetRegistry {
         let mut ids: Vec<u64> = Vec::new(&env);
         let mut batch_hashes: Vec<BytesN<32>> = Vec::new(&env);
 
+        let mut next_id: u64 = env.storage().instance().get(&ASSET_COUNT).unwrap_or(0);
+
         for asset_in in assets.iter() {
             if !Self::is_valid_asset_type(env.clone(), asset_in.asset_type.clone()) {
                 panic_with_error!(&env, ContractError::InvalidAssetType);
@@ -213,7 +215,8 @@ impl AssetRegistry {
             }
             batch_hashes.push_back(meta_hash.clone());
 
-            let id: u64 = env.storage().instance().get(&ASSET_COUNT).unwrap_or(0) + 1;
+            next_id += 1;
+            let id = next_id;
             let asset = Asset {
                 asset_id: id,
                 asset_type: asset_in.asset_type.clone(),
@@ -225,7 +228,6 @@ impl AssetRegistry {
 
             env.storage().persistent().set(&asset_key(id), &asset);
             env.storage().persistent().extend_ttl(&asset_key(id), 518400, 518400);
-            env.storage().instance().set(&ASSET_COUNT, &id);
             env.storage().persistent().set(&dedup_key(&owner, &meta_hash), &id);
             env.storage().persistent().extend_ttl(&dedup_key(&owner, &meta_hash), 518400, 518400);
 
@@ -237,6 +239,10 @@ impl AssetRegistry {
             );
 
             ids.push_back(id);
+        }
+
+        if next_id > env.storage().instance().get(&ASSET_COUNT).unwrap_or(0) {
+            env.storage().instance().set(&ASSET_COUNT, &next_id);
         }
 
         // Ensure owner index TTL is extended after all batch writes
@@ -1734,6 +1740,40 @@ mod tests {
                 ContractError::DuplicateAsset as u32,
             ))),
         );
+    }
+
+    #[test]
+    fn test_batch_register_assets_contiguous_ids() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+
+        // Register one asset first so ASSET_COUNT starts at 1
+        let single = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "first"),
+            &owner,
+        );
+        assert_eq!(single, 1);
+
+        // Batch of three should get IDs 2, 3, 4 — contiguous, no gaps
+        let mut batch = Vec::new(&env);
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "A") });
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "B") });
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "C") });
+
+        let ids = client.batch_register_assets(&owner, &batch);
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.get(0).unwrap(), 2);
+        assert_eq!(ids.get(1).unwrap(), 3);
+        assert_eq!(ids.get(2).unwrap(), 4);
     }
 
     #[test]
