@@ -666,6 +666,29 @@ mod tests {
     }
 
     #[test]
+    fn test_revoke_already_revoked_returns_structured_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+        client.revoke_credential(&engineer);
+
+        let result = client.try_revoke_credential(&engineer);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::CredentialAlreadyRevoked as u32
+            )))
+        );
+    }
+
+    #[test]
     fn test_initialize_admin_double_call_rejected() {
         let env = Env::default();
         env.mock_all_auths();
