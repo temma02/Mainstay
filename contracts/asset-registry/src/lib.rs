@@ -44,6 +44,7 @@ const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
 const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
 const ASSET_TYPE_PREFIX: Symbol = symbol_short!("AST_TYPE");
 const PENDING_ADMIN_KEY: Symbol = symbol_short!("PADMIN");
+pub const DEREG_TOPIC: Symbol = symbol_short!("DEREG_AST");
 
 
 #[contracterror]
@@ -469,7 +470,7 @@ impl AssetRegistry {
 
         // Emit deregistration event
         env.events().publish(
-            (symbol_short!("DEREG_AST"), asset_id),
+            (DEREG_TOPIC, asset_id),
             (asset.asset_type.clone(), asset.owner.clone()),
         );
     }
@@ -1963,6 +1964,43 @@ mod tests {
 
         client.deregister_asset(&owner, &id);
         assert!(!client.asset_exists(&id));
+    }
+
+    #[test]
+    fn test_deregister_asset_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        client.deregister_asset(&owner, &id);
+
+        let events = env.events().all();
+        let (_, topics, data): (_, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
+            events.last().unwrap();
+        assert_eq!(
+            soroban_sdk::Val::from(topics.get(0).unwrap()),
+            soroban_sdk::Val::from(DEREG_TOPIC)
+        );
+        assert_eq!(
+            soroban_sdk::Val::from(topics.get(1).unwrap()),
+            soroban_sdk::Val::from(id)
+        );
+        let (emitted_type, emitted_owner): (Symbol, Address) =
+            soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(emitted_type, symbol_short!("GENSET"));
+        assert_eq!(emitted_owner, owner);
     }
 
     #[test]
