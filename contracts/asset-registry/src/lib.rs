@@ -368,6 +368,7 @@ impl AssetRegistry {
             panic_with_error!(&env, ContractError::PendingAdminAlreadyExists);
         }
         env.storage().instance().set(&PENDING_ADMIN_KEY, &new_admin);
+        env.events().publish((symbol_short!("PROP_ADMIN"),), (admin, new_admin));
     }
 
     /// Accept the admin transfer (step 2 of 2-step transfer).
@@ -906,6 +907,32 @@ mod tests {
                 ContractError::UnauthorizedAdmin as u32,
             ))),
         );
+    }
+
+    #[test]
+    fn test_propose_admin_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        client.propose_admin(&admin, &new_admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data): (_, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) = events.get(0).unwrap();
+        assert_eq!(
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            symbol_short!("PROP_ADMIN")
+        );
+        let (emitted_admin, emitted_new_admin): (Address, Address) =
+            soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(emitted_admin, admin);
+        assert_eq!(emitted_new_admin, new_admin);
     }
 
     #[test]
