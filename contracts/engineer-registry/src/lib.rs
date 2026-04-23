@@ -1582,6 +1582,41 @@ assert_eq!(new_expires_at, previous_expires_at + 86_400);
     }
 
     #[test]
+    fn test_remove_trusted_issuer_revokes_engineers() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let engineer1 = Address::generate(&env);
+        let engineer2 = Address::generate(&env);
+        let hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let hash2 = BytesN::from_array(&env, &[2u8; 32]);
+
+        // Add issuer as trusted
+        client.add_trusted_issuer(&admin, &issuer);
+
+        // Register two engineers
+        client.register_engineer(&engineer1, &hash1, &issuer, &31_536_000);
+        client.register_engineer(&engineer2, &hash2, &issuer, &31_536_000);
+
+        // Verify engineers are active
+        assert!(client.verify_engineer(&engineer1));
+        assert!(client.verify_engineer(&engineer2));
+
+        // Remove the trusted issuer
+        client.remove_trusted_issuer(&admin, &issuer);
+
+        // Verify engineers are now revoked
+        assert!(!client.verify_engineer(&engineer1));
+        assert!(!client.verify_engineer(&engineer2));
+
+        // Check status
+        assert_eq!(client.get_engineer_status(&engineer1), EngineerStatus::Revoked);
+        assert_eq!(client.get_engineer_status(&engineer2), EngineerStatus::Revoked);
+    }
+
+    #[test]
     fn test_different_issuer_cannot_revoke_another_issuers_engineer() {
         let env = Env::default();
         let contract_id = env.register(EngineerRegistry, ());
