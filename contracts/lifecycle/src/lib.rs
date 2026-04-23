@@ -154,7 +154,7 @@ fn apply_decay(
     asset_id: u64,
     emit_event: bool,
     update_on_zero_interval: bool,
-ut     max_history: u32,
+    max_history: u32,
 ) -> u32 {
     let current_score: u32 = env
         .storage()
@@ -599,7 +599,7 @@ impl Lifecycle {
 
         validate_notes_length(&env, &notes, config.max_notes_length);
         // Validate task type early before cross-contract calls
-        let weight = get_task_weight(&env, &task_type);
+        let _ = get_task_weight(&env, &task_type);
 
         // Verify asset exists
         let asset_registry: Address = env
@@ -656,7 +656,7 @@ impl Lifecycle {
             .persistent()
             .get(&score_key(asset_id))
             .unwrap_or(0u32);
-        let new_score = (score + weight).min(100);
+        let new_score = (score + config.score_increment).min(100);
         env.storage()
             .persistent()
             .set(&score_key(asset_id), &new_score);
@@ -711,12 +711,10 @@ impl Lifecycle {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
         // Validate records early before cross-contract calls
-        let mut weights = Vec::new(&env);
         for (i, record) in records.iter().enumerate() {
             validate_notes_length(&env, &record.notes, config.max_notes_length);
-            // Validate task weight exists and collect weight
-            let weight = get_task_weight(&env, &record.task_type);
-            weights.push_back(weight);
+            // Validate task type is known
+            let _ = get_task_weight(&env, &record.task_type);
             // Log index for debugging
             env.events().publish((symbol_short!("VAL_IDX"), i as u32), ());
         }
@@ -760,9 +758,8 @@ impl Lifecycle {
             .get(&score_key(asset_id))
             .unwrap_or(0u32);
 
-        for (i, record) in records.iter().enumerate() {
-            let weight = weights.get(i as u32).unwrap();
-            score = (score + weight).min(100);
+        for record in records.iter() {
+            score = (score + config.score_increment).min(100);
             history.push_back(MaintenanceRecord {
                 asset_id,
                 task_type: record.task_type.clone(),
@@ -1395,7 +1392,7 @@ mod tests {
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        // 10 oil changes at 2 points each = 20 points
+        // 10 maintenance events at default score_increment (5) each = 50 points
         for _ in 0..10 {
             client.submit_maintenance(
                 &asset_id,
@@ -1405,7 +1402,7 @@ mod tests {
             );
         }
 
-        assert_eq!(client.get_collateral_score(&asset_id), 20);
+        assert_eq!(client.get_collateral_score(&asset_id), 50);
         assert_eq!(client.get_maintenance_history(&asset_id).len(), 10);
     }
 
@@ -1674,8 +1671,51 @@ mod tests {
             &engineer,
         );
 
-        // score_increment config is stored but task weight (2 for OIL_CHG) governs scoring
-        assert_eq!(client.get_collateral_score(&asset_id), 2);
+        // score_increment (12) governs scoring, not task weight
+        assert_eq!(client.get_collateral_score(&asset_id), 12);
+    }
+
+    #[test]
+    fn test_score_increment_affects_scoring() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Default score_increment is 5
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "First"),
+            &engineer,
+        );
+        assert_eq!(client.get_collateral_score(&asset_id), 5);
+
+        // Update score_increment to 8
+        client.update_score_increment(&admin, &8);
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("FILTER"),
+            &String::from_str(&env, "Second"),
+            &engineer,
+        );
+        // Score should be 5 + 8 = 13
+        assert_eq!(client.get_collateral_score(&asset_id), 13);
+
+        // Update score_increment to 20 (capped at 100)
+        client.update_score_increment(&admin, &20);
+        for _ in 0..5 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("ENGINE"),
+                &String::from_str(&env, "Bulk"),
+                &engineer,
+            );
+        }
+        // 13 + 5*20 = 113, capped at 100
+        assert_eq!(client.get_collateral_score(&asset_id), 100);
     }
 
     #[test]
@@ -1904,7 +1944,7 @@ mod tests {
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        // Build up a score first
+        // Build up a score first (default score_increment = 5)
         client.submit_maintenance(
             &asset_id,
             &symbol_short!("ENGINE"),
@@ -1914,17 +1954,17 @@ mod tests {
 
         let initial_score = client.get_collateral_score(&asset_id);
 
-        // Update decay config: 10 points per 60 seconds (for testing)
-        client.update_decay_config(&admin, &10, &60);
+        // Update decay config: 2 points per 60 seconds (for testing)
+        client.update_decay_config(&admin, &2, &60);
 
         // Advance ledger time by 120 seconds (2 intervals)
         env.ledger().with_mut(|li| li.timestamp = li.timestamp + 120);
 
-        // Apply decay: should lose 20 points (10 * 2 intervals)
+        // Apply decay: should lose 4 points (2 * 2 intervals)
         client.decay_score(&asset_id);
         let new_score = client.get_collateral_score(&asset_id);
 
-        assert_eq!(new_score, initial_score.saturating_sub(20));
+        assert_eq!(new_score, initial_score.saturating_sub(4));
     }
 
     #[test]
@@ -1982,7 +2022,7 @@ mod tests {
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        // Build up a score
+        // Build up a score to 25 (5 * default score_increment of 5)
         for _ in 0..5 {
             client.submit_maintenance(
                 &asset_id,
@@ -2016,8 +2056,8 @@ mod tests {
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        // Build score to 20 (ENGINE = 10 pts)
-        for _ in 0..2 {
+        // Build score to 20 (default score_increment = 5)
+        for _ in 0..4 {
             client.submit_maintenance(
                 &asset_id,
                 &symbol_short!("ENGINE"),
@@ -2049,7 +2089,7 @@ mod tests {
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        for _ in 0..5 {
+        for _ in 0..10 {
             client.submit_maintenance(
                 &asset_id,
                 &symbol_short!("ENGINE"),
@@ -2081,7 +2121,7 @@ mod tests {
             &String::from_str(&env, "Single major service"),
             &engineer,
         );
-        assert_eq!(client.get_collateral_score(&asset_id), 10);
+        assert_eq!(client.get_collateral_score(&asset_id), 5);
 
         const SECONDS_PER_DAY: u64 = 86_400;
         const DAYS_PER_YEAR: u64 = 365;
@@ -2386,9 +2426,9 @@ mod tests {
         let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        // asset_a: 5 × ENGINE (10 pts each) = 50 → eligible
+        // asset_a: 10 × ENGINE (5 pts each) = 50 → eligible
         let asset_a = register_asset(&env, &asset_registry_client);
-        for _ in 0..5 {
+        for _ in 0..10 {
             client.submit_maintenance(
                 &asset_a,
                 &symbol_short!("ENGINE"),
@@ -2397,7 +2437,7 @@ mod tests {
             );
         }
 
-        // asset_b: 1 × OIL_CHG (2 pts) → not eligible
+        // asset_b: 1 × OIL_CHG (5 pts) → not eligible
         let asset_b = register_asset(&env, &asset_registry_client);
         client.submit_maintenance(
             &asset_b,
@@ -2619,7 +2659,7 @@ mod tests {
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        // OIL_CHG = 2 pts, ENGINE = 10 pts, FILTER = 5 pts
+        // All tasks use score_increment (default 5)
         client.submit_maintenance(
             &asset_id,
             &symbol_short!("OIL_CHG"),
@@ -2640,9 +2680,9 @@ mod tests {
         );
 
         let history = client.get_score_history(&asset_id);
-        assert_eq!(history.get(0).unwrap().score, 2); // 0 + 2
-        assert_eq!(history.get(1).unwrap().score, 12); // 2 + 10
-        assert_eq!(history.get(2).unwrap().score, 17); // 12 + 5
+        assert_eq!(history.get(0).unwrap().score, 5);  // 0 + 5
+        assert_eq!(history.get(1).unwrap().score, 10); // 5 + 5
+        assert_eq!(history.get(2).unwrap().score, 15); // 10 + 5
     }
 
     #[test]
@@ -2686,8 +2726,8 @@ mod tests {
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        // 10 REBUILD tasks at 10 pts each would be 100, then more should stay at 100
-        for _ in 0..12 {
+        // 20 tasks at default score_increment (5) each would be 100, then more should stay at 100
+        for _ in 0..22 {
             client.submit_maintenance(
                 &asset_id,
                 &symbol_short!("REBUILD"),
@@ -2701,9 +2741,9 @@ mod tests {
         for i in 0..history.len() {
             assert!(history.get(i).unwrap().score <= 100);
         }
-        // After 10 REBUILD tasks the score is already 100; subsequent entries stay at 100
-        assert_eq!(history.get(10).unwrap().score, 100);
-        assert_eq!(history.get(11).unwrap().score, 100);
+        // After 20 tasks the score is already 100; subsequent entries stay at 100
+        assert_eq!(history.get(20).unwrap().score, 100);
+        assert_eq!(history.get(21).unwrap().score, 100);
     }
 
     #[test]
@@ -2844,8 +2884,8 @@ mod tests {
 
         client.batch_submit_maintenance(&asset_id, &records, &engineer);
 
-        // OIL_CHG=2, INSPECT=2, ENGINE=10 => 14
-        assert_eq!(client.get_collateral_score(&asset_id), 14);
+        // 3 records at default score_increment (5) each => 15
+        assert_eq!(client.get_collateral_score(&asset_id), 15);
         assert_eq!(client.get_maintenance_history(&asset_id).len(), 3);
     }
 
@@ -3318,7 +3358,7 @@ mod tests {
         engineer_registry.register_engineer(&engineer, &BytesN::from_array(&env, &[2u8; 32]), &issuer, &31_536_000);
         assert!(engineer_registry.verify_engineer(&engineer));
 
-        // 3. Submit 10 maintenance records (ENGINE = 10pts each, capped at 100)
+        // 3. Submit 10 maintenance records (default score_increment = 5pts each)
         for i in 0..10u32 {
             lifecycle.submit_maintenance(
                 &asset_id,
@@ -3350,17 +3390,17 @@ mod tests {
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        // ENGINE = 10 pts
+        // Default score_increment = 5
         client.submit_maintenance(
             &asset_id,
             &symbol_short!("ENGINE"),
             &String::from_str(&env, ""),
             &engineer,
         );
-        let initial_score: u32 = 10;
+        let initial_score: u32 = 5;
 
-        // Use fast decay: 3 pts per 60s, advance 60s (1 interval)
-        client.update_decay_config(&admin, &3, &60);
+        // Use fast decay: 2 pts per 60s, advance 60s (1 interval)
+        client.update_decay_config(&admin, &2, &60);
         env.ledger().with_mut(|li| li.timestamp += 60);
         let decay_time = env.ledger().timestamp();
 
@@ -3378,7 +3418,7 @@ mod tests {
         assert_eq!(t1, asset_id);
 
         // Data: (old_score, new_score, timestamp)
-        let expected_new_score: u32 = initial_score - 3;
+        let expected_new_score: u32 = initial_score - 2;
         let (ev_old, ev_new, ev_ts): (u32, u32, u64) = data.try_into_val(&env).unwrap();
         assert_eq!(ev_old, initial_score);
         assert_eq!(ev_new, expected_new_score);
@@ -3417,21 +3457,19 @@ mod tests {
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        // Minor: OIL_CHG = 2
+        // All valid task types now use score_increment (default 5)
         client.submit_maintenance(&asset_id, &symbol_short!("OIL_CHG"), &String::from_str(&env, ""), &engineer);
-        assert_eq!(client.get_collateral_score(&asset_id), 2);
+        assert_eq!(client.get_collateral_score(&asset_id), 5);
 
         client.reset_score(&admin, &asset_id);
 
-        // Medium: FILTER = 5
         client.submit_maintenance(&asset_id, &symbol_short!("FILTER"), &String::from_str(&env, ""), &engineer);
         assert_eq!(client.get_collateral_score(&asset_id), 5);
 
         client.reset_score(&admin, &asset_id);
 
-        // Major: ENGINE = 10
         client.submit_maintenance(&asset_id, &symbol_short!("ENGINE"), &String::from_str(&env, ""), &engineer);
-        assert_eq!(client.get_collateral_score(&asset_id), 10);
+        assert_eq!(client.get_collateral_score(&asset_id), 5);
 
         client.reset_score(&admin, &asset_id);
 
@@ -4058,8 +4096,8 @@ mod tests {
         );
         assert!(engineer_registry.verify_engineer(&engineer));
 
-        // 4. Submit maintenance — 5 × OVERHAUL (10 pts each) = 50, eligible
-        for _ in 0..5 {
+        // 4. Submit maintenance — 10 × OVERHAUL (5 pts each) = 50, eligible
+        for _ in 0..10 {
             lifecycle.submit_maintenance(
                 &asset_id,
                 &symbol_short!("OVERHAUL"),
@@ -4071,7 +4109,7 @@ mod tests {
         // 5. Verify score and collateral eligibility
         assert_eq!(lifecycle.get_collateral_score(&asset_id), 50);
         assert!(lifecycle.is_collateral_eligible(&asset_id));
-        assert_eq!(lifecycle.get_maintenance_history(&asset_id).len(), 5);
+        assert_eq!(lifecycle.get_maintenance_history(&asset_id).len(), 10);
 
         // 6. Transfer asset to new owner
         let new_owner = Address::generate(&env);
