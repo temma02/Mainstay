@@ -1250,13 +1250,19 @@ impl Lifecycle {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
 
+        let now = env.ledger().timestamp();
         env.storage().persistent().set(&score_key(asset_id), &0u32);
         env.storage()
             .persistent()
             .extend_ttl(&score_key(asset_id), 518400, 518400);
+        env.storage()
+            .persistent()
+            .set(&last_update_key(asset_id), &now);
+        env.storage()
+            .persistent()
+            .extend_ttl(&last_update_key(asset_id), 518400, 518400);
 
-        env.events()
-            .publish((EVENT_RST_SCR, asset_id), (admin, env.ledger().timestamp()));
+        env.events().publish((EVENT_RST_SCR, asset_id), (admin, now));
     }
 
     /// Check collateral eligibility for multiple assets in a single call.
@@ -3501,6 +3507,46 @@ mod tests {
         // Admin resets the score
         client.reset_score(&admin, &asset_id);
         assert_eq!(client.get_collateral_score(&asset_id), 0);
+    }
+
+    #[test]
+    fn test_decay_after_reset_uses_reset_timestamp() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Build up a score, then reset
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("ENGINE"),
+            &String::from_str(&env, "Major overhaul"),
+            &engineer,
+        );
+        client.reset_score(&admin, &asset_id);
+
+        // Rebuild score after reset
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("ENGINE"),
+            &String::from_str(&env, "Post-reset work"),
+            &engineer,
+        );
+        let score_after_rebuild = client.get_collateral_score(&asset_id);
+        assert!(score_after_rebuild > 0);
+
+        // Advance time by less than one decay interval (default 2592000s / 30 days)
+        // so no decay should be applied
+        env.ledger().with_mut(|li| li.timestamp += 100);
+        let score_after_short_wait = client.decay_score(&asset_id);
+        assert_eq!(score_after_short_wait, score_after_rebuild);
+
+        // Advance time by one full decay interval and verify exactly one decay step
+        env.ledger().with_mut(|li| li.timestamp += 2592000);
+        let score_after_decay = client.decay_score(&asset_id);
+        assert_eq!(score_after_decay, score_after_rebuild.saturating_sub(5));
     }
 
     #[test]
