@@ -154,7 +154,7 @@ fn apply_decay(
     asset_id: u64,
     emit_event: bool,
     update_on_zero_interval: bool,
-    max_history: u32,
+ut     max_history: u32,
 ) -> u32 {
     let current_score: u32 = env
         .storage()
@@ -523,6 +523,12 @@ impl Lifecycle {
 
     /// Admin-only function to update the maximum history records per asset.
     /// This allows adjusting the cap on maintenance history without redeployment.
+    ///
+    /// # Lazy Pruning Behavior
+    /// When `new_max` is lower than the current cap, existing per-asset histories that exceed
+    /// the new cap are **not** automatically pruned. Pruning happens lazily during the next
+    /// maintenance submission for that asset. To immediately prune an asset's history to the
+    /// new cap, use `prune_asset_history()`.
     ///
     /// # Arguments
     /// * `admin` - The admin address that must match the stored config admin
@@ -1273,6 +1279,68 @@ impl Lifecycle {
         }
         results
     }
+
+    /// Admin-only function to prune a specific asset's history to the current max_history cap.
+    /// 
+    /// Truncates both maintenance history and score history to not exceed the current
+    /// `max_history` setting. Useful when `max_history` has been reduced and you need
+    /// to immediately enforce the new cap on existing assets.
+    ///
+    /// # Arguments
+    /// * `admin` - The admin address that must match the stored config admin
+    /// * `asset_id` - The unique identifier of the asset to prune
+    ///
+    /// # Panics
+    /// - [`ContractError::NotInitialized`] if contract has not been initialized
+    /// - [`ContractError::UnauthorizedAdmin`] if caller is not the admin
+    pub fn prune_asset_history(env: Env, admin: Address, asset_id: u64) {
+        ensure_not_paused(&env);
+        admin.require_auth();
+
+        let config: Config = env
+            .storage()
+            .instance()
+            .get(&CONFIG)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        if config.admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+
+        // Prune maintenance history if it exceeds max_history
+        let history_key = history_key(asset_id);
+        if let Some(mut history) = env.storage().persistent().get::<_, Vec<MaintenanceRecord>>(&history_key) {
+            if history.len() > config.max_history as u32 {
+                // Keep only the last max_history entries
+                let start_idx = history.len() - config.max_history as u32;
+                let mut pruned = Vec::new(&env);
+                for i in start_idx..history.len() {
+                    pruned.push_back(history.get(i).unwrap());
+                }
+                env.storage().persistent().set(&history_key, &pruned);
+                env.storage().persistent().extend_ttl(&history_key, 518400, 518400);
+            }
+        }
+
+        // Prune score history if it exceeds max_history
+        let score_history_key_val = score_history_key(asset_id);
+        if let Some(mut score_history) = env.storage().persistent().get::<_, Vec<ScoreEntry>>(&score_history_key_val) {
+            if score_history.len() > config.max_history as u32 {
+                // Keep only the last max_history entries
+                let start_idx = score_history.len() - config.max_history as u32;
+                let mut pruned = Vec::new(&env);
+                for i in start_idx..score_history.len() {
+                    pruned.push_back(score_history.get(i).unwrap());
+                }
+                env.storage().persistent().set(&score_history_key_val, &pruned);
+                env.storage().persistent().extend_ttl(&score_history_key_val, 518400, 518400);
+            }
+        }
+
+        env.events().publish(
+            (symbol_short!("PRUNE"), admin),
+            asset_id,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1747,6 +1815,102 @@ mod tests {
         assert!(history_after.len() <= 5u32, 
                 "Score history {} should be <= 5 after max_history update", 
                 history_after.len());
+    }
+
+    #[test]
+    fn test_max_history_reduction_does_not_automatically_prune() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Setup with initial max_history of 10
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 10);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Submit 10 maintenance records to reach max_history
+        for i in 0..10 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, &format!("Maintenance {}", i)),
+                &engineer,
+            );
+        }
+
+        // Verify both histories have 10 entries
+        let history = client.get_maintenance_history(&asset_id);
+        let score_history = client.get_score_history(&asset_id);
+        assert_eq!(history.len(), 10u32);
+        assert_eq!(score_history.len(), 10u32);
+
+        // Reduce max_history to 3
+        client.update_max_history(&admin, &3);
+
+        // Verify that existing histories were NOT pruned automatically
+        let history_after = client.get_maintenance_history(&asset_id);
+        let score_history_after = client.get_score_history(&asset_id);
+        assert_eq!(history_after.len(), 10u32, "Maintenance history should remain at 10 until next write");
+        assert_eq!(score_history_after.len(), 10u32, "Score history should remain at 10 until next write");
+    }
+
+    #[test]
+    fn test_prune_asset_history_reduces_both_histories() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Setup with initial max_history of 10
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 10);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Submit 10 maintenance records to reach max_history
+        for i in 0..10 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, &format!("Maintenance {}", i)),
+                &engineer,
+            );
+        }
+
+        // Reduce max_history and verify histories still at 10
+        client.update_max_history(&admin, &3);
+        let history_before = client.get_maintenance_history(&asset_id);
+        let score_history_before = client.get_score_history(&asset_id);
+        assert_eq!(history_before.len(), 10u32);
+        assert_eq!(score_history_before.len(), 10u32);
+
+        // Call prune_asset_history to immediately prune to the new cap
+        client.prune_asset_history(&admin, &asset_id);
+
+        // Verify both histories are now pruned to max_history of 3
+        let history_after = client.get_maintenance_history(&asset_id);
+        let score_history_after = client.get_score_history(&asset_id);
+        assert_eq!(history_after.len(), 3u32, "Maintenance history should be pruned to 3");
+        assert_eq!(score_history_after.len(), 3u32, "Score history should be pruned to 3");
+
+        // Verify that the most recent entries were kept (not the oldest)
+        let last_before = history_before.get(9).unwrap();
+        let last_after = history_after.get(2).unwrap();
+        assert_eq!(last_before.timestamp, last_after.timestamp, "Most recent entries should be kept");
+    }
+
+    #[test]
+    fn test_non_admin_cannot_prune_asset_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, _, _) = setup(&env, 10);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let outsider = Address::generate(&env);
+
+        let result = client.try_prune_asset_history(&outsider, &asset_id);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedAdmin as u32,
+            ))),
+        );
     }
 
     #[test]
