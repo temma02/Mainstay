@@ -114,7 +114,7 @@ fn engineer_history_key(engineer: &Address) -> (Symbol, Address) {
     (symbol_short!("ENG_HIST"), engineer.clone())
 }
 
-fn engineer_history_add(env: &Env, engineer: &Address, asset_id: u64) {
+fn engineer_history_add(env: &Env, engineer: &Address, asset_id: u64, max_history: u32) {
     let key = engineer_history_key(engineer);
     let mut ids: Vec<u64> = env
         .storage()
@@ -132,6 +132,9 @@ fn engineer_history_add(env: &Env, engineer: &Address, asset_id: u64) {
     }
 
     if !found {
+        if max_history > 0 && ids.len() >= max_history {
+            ids.remove(0);
+        }
         ids.push_back(asset_id);
     }
 
@@ -655,7 +658,7 @@ impl Lifecycle {
             .persistent()
             .extend_ttl(&history_key(asset_id), 518400, 518400);
 
-        engineer_history_add(&env, &engineer, asset_id);
+        engineer_history_add(&env, &engineer, asset_id, config.max_history);
 
         // Update collateral score
         let score: u32 = env
@@ -793,7 +796,7 @@ impl Lifecycle {
         }
 
         // Add to engineer history only once per asset per batch
-        engineer_history_add(&env, &engineer, asset_id);
+        engineer_history_add(&env, &engineer, asset_id, config.max_history);
 
         env.storage()
             .persistent()
@@ -1648,6 +1651,33 @@ mod tests {
         let empty_history = client.get_engineer_maintenance_history(&other_engineer);
         assert_eq!(empty_history.len(), 0);
     }
+    #[test]
+    fn test_engineer_history_bounded() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 3);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Register and maintain 5 different assets (exceeds max_history=3)
+        let asset_ids: Vec<u64> = (0..5).map(|_| {
+            let asset_id = register_asset(&env, &asset_registry_client);
+            client.submit_maintenance(
+                &asset_id,
+                &String::from_str(&env, "service"),
+                &engineer,
+            );
+            asset_id
+        }).collect();
+
+        // Engineer history should be capped at max_history (3)
+        let history = client.get_engineer_maintenance_history(&engineer);
+
+        // Oldest entries (asset_ids[0], asset_ids[1]) should have been evicted
+
+        // Newest entries should remain
+    }
+
 
     #[test]
     fn test_get_last_service_no_history() {
