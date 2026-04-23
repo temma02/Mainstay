@@ -47,6 +47,7 @@ fn engineer_key(addr: &Address) -> (Symbol, Address) {
 
 const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
 const REG_ENG_TOPIC: Symbol = symbol_short!("REG_ENG");
+const REVOKE_TOPIC: Symbol = symbol_short!("REV_CRED");
 
 fn is_paused(env: &Env) -> bool {
     env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
@@ -205,7 +206,7 @@ impl EngineerRegistry {
 
         // Emit credential revocation event
         env.events().publish(
-            (symbol_short!("REV_CRED"), engineer.clone()),
+            (REVOKE_TOPIC, engineer.clone()),
             (record.issuer.clone(), env.ledger().timestamp()),
         );
     }
@@ -656,11 +657,22 @@ mod tests {
 
         client.add_trusted_issuer(&admin, &issuer);
         client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+
+        let revoked_at = env.ledger().timestamp();
         client.revoke_credential(&engineer);
 
-        // Verify revocation event was emitted
         let events = env.events().all();
-        assert!(events.len() > 0);
+        let (_, topics, data) = events.last().unwrap();
+
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let t1: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, REVOKE_TOPIC);
+        assert_eq!(t1, engineer);
+
+        let (emitted_issuer, emitted_timestamp): (Address, u64) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_issuer, issuer);
+        assert_eq!(emitted_timestamp, revoked_at);
     }
 
     #[test]
