@@ -78,6 +78,10 @@ fn issuer_engineers_key(issuer: &Address) -> (Symbol, Address) {
     (symbol_short!("ISS_ENGS"), issuer.clone())
 }
 
+/// Returns the key for the authoritative trusted-issuer list in instance storage.
+/// This list MUST NOT expire: TTL must be extended on every write so that
+/// `get_trusted_issuers` never returns a stale empty vec while individual
+/// `trusted_key` entries are still active.
 fn issuer_list_key() -> Symbol {
     symbol_short!("ISS_LIST")
 }
@@ -474,6 +478,7 @@ impl EngineerRegistry {
             list.push_back(issuer.clone());
         }
         env.storage().instance().set(&issuer_list_key(), &list);
+        env.storage().instance().extend_ttl(518400, 518400);
 
         env.events()
             .publish((symbol_short!("ISS_ADD"), admin), (issuer,));
@@ -519,6 +524,7 @@ impl EngineerRegistry {
             }
         }
         env.storage().instance().set(&issuer_list_key(), &new_list);
+        env.storage().instance().extend_ttl(518400, 518400);
 
         env.events()
             .publish((symbol_short!("ISS_RM"), admin.clone()), (issuer,));
@@ -1564,6 +1570,38 @@ assert_eq!(new_expires_at, previous_expires_at + 86_400);
 
         let (emitted_issuer,): (Address,) = data.try_into_val(&env).unwrap();
         assert_eq!(emitted_issuer, issuer);
+    }
+
+    #[test]
+    fn test_get_trusted_issuers_consistent_after_add_and_remove() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer_a = Address::generate(&env);
+        let issuer_b = Address::generate(&env);
+
+        // Empty initially
+        assert_eq!(client.get_trusted_issuers().len(), 0);
+
+        // Add both
+        client.add_trusted_issuer(&admin, &issuer_a);
+        client.add_trusted_issuer(&admin, &issuer_b);
+        let list = client.get_trusted_issuers();
+        assert_eq!(list.len(), 2);
+        assert!(list.contains(issuer_a.clone()));
+        assert!(list.contains(issuer_b.clone()));
+
+        // Remove one — list must stay consistent
+        client.remove_trusted_issuer(&admin, &issuer_a);
+        let list = client.get_trusted_issuers();
+        assert_eq!(list.len(), 1);
+        assert!(!list.contains(issuer_a.clone()));
+        assert!(list.contains(issuer_b.clone()));
+
+        // is_trusted_issuer must agree with the list
+        assert!(!client.is_trusted_issuer(&issuer_a));
+        assert!(client.is_trusted_issuer(&issuer_b));
     }
 
     #[test]
