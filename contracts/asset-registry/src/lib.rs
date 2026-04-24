@@ -19,6 +19,7 @@ pub enum ContractError {
     InvalidAssetType = 8,
     PendingAdminAlreadyExists = 9,
     TypeInUse = 10,
+    EmptyMetadata = 11,
 }
 
 #[contracttype]
@@ -165,6 +166,10 @@ impl AssetRegistry {
     pub fn register_asset(env: Env, asset_type: Symbol, metadata: String, owner: Address) -> u64 {
         ensure_not_paused(&env);
         owner.require_auth();
+
+        if metadata.len() == 0 {
+            panic_with_error!(&env, ContractError::EmptyMetadata);
+        }
 
         if !Self::is_valid_asset_type(env.clone(), asset_type.clone()) {
             panic_with_error!(&env, ContractError::InvalidAssetType);
@@ -499,6 +504,13 @@ impl AssetRegistry {
     /// If the dedup key has already expired from storage, the remove operation
     /// is a no-op. This allows the same owner to re-register the same metadata
     /// after the dedup key has naturally expired.
+    ///
+    /// # Lifecycle Data
+    /// Maintenance history, collateral score, score history, and last-update timestamp
+    /// stored in the lifecycle contract are **not** removed by this call. They remain
+    /// readable by anyone who knows the asset ID and continue to consume storage until
+    /// they expire or are explicitly removed. After deregistering, call
+    /// `lifecycle::purge_asset_data(admin, asset_id)` to reclaim that storage.
     ///
     /// # Panics
     /// - [`ContractError::AssetNotFound`] if no asset exists with the given ID
@@ -2290,5 +2302,26 @@ mod tests {
         );
         let (emitted_type,): (Symbol,) = soroban_sdk::FromVal::from_val(&env, &data);
         assert_eq!(emitted_type, symbol_short!("GENSET"));
+    }
+
+    #[test]
+    fn test_register_asset_rejects_empty_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let client = AssetRegistryClient::new(&env, &env.register(AssetRegistry, ()));
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let result = client.try_register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, ""),
+            &owner,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::EmptyMetadata.into()))
+        );
     }
 }
