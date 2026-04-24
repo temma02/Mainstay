@@ -184,6 +184,33 @@ fn ensure_not_paused(env: &Env) {
     }
 }
 
+/// Compute the decayed score without writing anything to storage.
+/// Returns the score that *would* result from applying decay at the current ledger time.
+fn compute_decay(env: &Env, asset_id: u64) -> u32 {
+    let current_score: u32 = env
+        .storage()
+        .persistent()
+        .get(&score_key(asset_id))
+        .unwrap_or(0u32);
+    if current_score == 0 {
+        return 0;
+    }
+    let last_update: u64 = env
+        .storage()
+        .persistent()
+        .get(&last_update_key(asset_id))
+        .unwrap_or(0u64);
+    let config: Config = env
+        .storage()
+        .persistent()
+        .get(&CONFIG)
+        .unwrap_or_else(|| panic_with_error!(env, ContractError::NotInitialized));
+    let time_elapsed = env.ledger().timestamp().saturating_sub(last_update);
+    let decay_intervals = time_elapsed / config.decay_interval;
+    let total_decay = (decay_intervals as u32) * config.decay_rate;
+    current_score.saturating_sub(total_decay)
+}
+
 fn apply_decay(
     env: &Env,
     asset_id: u64,
@@ -1057,27 +1084,29 @@ impl Lifecycle {
 
     /// Get the current collateral score for an asset.
     /// Verifies asset exists before returning the score.
-    /// Applies time-based decay lazily and persists the decayed score.
+    ///
+    /// This function is **read-only**: it computes the time-decayed score without
+    /// writing anything to storage. To persist the decayed score and update the
+    /// last-update timestamp, call [`decay_score`] explicitly.
     ///
     /// # Arguments
     /// * `asset_id` - The unique identifier of the asset
     ///
     /// # Returns
-    /// The current collateral score (0-100)
+    /// The current collateral score (0-100) after applying time-based decay
     ///
     /// # Panics
     /// - [`ContractError::NotInitialized`] if contract has not been initialized
     /// - [`ContractError::AssetNotFound`] if the asset does not exist
     pub fn get_collateral_score(env: Env, asset_id: u64) -> u32 {
-        // Verify asset exists before returning score
         let asset_registry = get_asset_registry_addr(&env);
         verify_asset_exists(&env, &asset_registry, &asset_id);
-        let config: Config = env
-            .storage()
+        // Ensure CONFIG is present (NotInitialized guard)
+        env.storage()
             .persistent()
-            .get(&CONFIG)
+            .get::<_, Config>(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        apply_decay(&env, asset_id, false, false, config.max_history)
+        compute_decay(&env, asset_id)
     }
 
     /// Returns the full score trend: one (timestamp, score) entry per maintenance event.
@@ -1158,9 +1187,8 @@ impl Lifecycle {
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
-        // Use unchecked version since we already verified asset exists
-        apply_decay(&env, asset_id, false, false, config.max_history)
-            >= config.eligibility_threshold
+        // Use read-only decay computation since we already verified asset exists
+        compute_decay(&env, asset_id) >= config.eligibility_threshold
     }
 
     /// Returns the timestamp of the most recent maintenance event, or None if no maintenance has been submitted.
@@ -2441,6 +2469,55 @@ mod tests {
         // Ensure value is written back to storage (subsequent reads are consistent)
         let decayed_again = client.get_collateral_score(&asset_id);
         assert_eq!(decayed_again, 10);
+    }
+
+    #[test]
+    fn test_get_collateral_score_is_read_only() {
+        // get_collateral_score must NOT write the decayed score back to storage.
+        // Calling it multiple times across ledger advances must always return the
+        // score computed from the *original* stored value, not a previously-decayed one.
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Build score to 20 (4 × default score_increment of 5)
+        for _ in 0..4 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("ENGINE"),
+                &String::from_str(&env, "Build score"),
+                &engineer,
+            );
+        }
+        assert_eq!(client.get_collateral_score(&asset_id), 20);
+
+        // Fast decay: 5 points per 60 seconds
+        client.update_decay_config(&admin, &5, &60);
+
+        // Advance 60 s (1 interval → −5 pts → expected 15)
+        env.ledger().with_mut(|li| li.timestamp += 60);
+        assert_eq!(client.get_collateral_score(&asset_id), 15);
+
+        // Advance another 60 s without calling decay_score.
+        // If get_collateral_score had written 15 back to storage, the next call
+        // would compute from 15 and return 10. But because it is read-only it must
+        // still compute from the original stored value of 20 and return 10 (2 intervals).
+        env.ledger().with_mut(|li| li.timestamp += 60);
+        assert_eq!(client.get_collateral_score(&asset_id), 10);
+
+        // Confirm the stored score is still 20 (untouched by get_collateral_score)
+        let contract_id = client.address.clone();
+        env.as_contract(&contract_id, || {
+            let stored: u32 = env
+                .storage()
+                .persistent()
+                .get(&score_key(asset_id))
+                .unwrap_or(0);
+            assert_eq!(stored, 20, "stored score must not be mutated by get_collateral_score");
+        });
     }
 
     #[test]
