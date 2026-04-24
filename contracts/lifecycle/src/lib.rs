@@ -19,6 +19,7 @@ pub enum ContractError {
     Paused = 9,
     InvalidTaskType = 10,
     PendingAdminAlreadyExists = 11,
+    IndexOutOfBounds = 12,
 }
 
 #[contracttype]
@@ -984,10 +985,13 @@ impl Lifecycle {
     /// # Arguments
     /// * `asset_id` - The unique identifier of the asset
     /// * `offset` - Zero-based start index for pagination
-    /// * `limit` - Maximum number of records to return
+    /// * `limit` - Maximum number of records to return (returns empty vec if 0)
     ///
     /// # Returns
     /// Vec containing the requested page of maintenance records
+    ///
+    /// # Panics
+    /// - [`ContractError::IndexOutOfBounds`] if `offset` >= history length
     pub fn get_maintenance_history_page(
         env: Env,
         asset_id: u64,
@@ -1001,8 +1005,11 @@ impl Lifecycle {
             .unwrap_or(Vec::new(&env));
 
         let len = history.len();
-        if offset >= len || limit == 0 {
+        if limit == 0 {
             return Vec::new(&env);
+        }
+        if offset >= len {
+            panic_with_error!(&env, ContractError::IndexOutOfBounds);
         }
 
         let end = (offset + limit).min(len);
@@ -1202,8 +1209,11 @@ impl Lifecycle {
             .unwrap_or_else(|| Vec::new(&env));
 
         let len = history.len();
-        if offset >= len || limit == 0 {
+        if limit == 0 {
             return Vec::new(&env);
+        }
+        if offset >= len {
+            panic_with_error!(&env, ContractError::IndexOutOfBounds);
         }
 
         let end = (offset + limit).min(len);
@@ -4309,6 +4319,33 @@ mod tests {
             client.get_maintenance_history_page(&asset_id, &0, &0).len(),
             0
         );
+    }
+
+    #[test]
+    fn test_get_maintenance_history_page_out_of_bounds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        for _ in 0..3 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, "oil change"),
+                &engineer,
+            );
+        }
+
+        // offset == len (3) -> IndexOutOfBounds
+        let result = client.try_get_maintenance_history_page(&asset_id, &3, &2);
+        assert_eq!(result, Err(Ok(ContractError::IndexOutOfBounds)));
+
+        // offset >> len (10) -> IndexOutOfBounds
+        let result = client.try_get_maintenance_history_page(&asset_id, &10, &2);
+        assert_eq!(result, Err(Ok(ContractError::IndexOutOfBounds)));
     }
 
     #[test]
