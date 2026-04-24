@@ -1636,6 +1636,23 @@ mod tests {
     }
 
     #[test]
+    fn test_engineer_history_no_duplicate_asset_id_on_repeated_maintenance() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        client.submit_maintenance(&asset_id, &symbol_short!("OIL_CHG"), &String::from_str(&env, "first"), &engineer);
+        client.submit_maintenance(&asset_id, &symbol_short!("INSPECT"), &String::from_str(&env, "second"), &engineer);
+
+        let history = client.get_engineer_maintenance_history(&engineer);
+        assert_eq!(history.len(), 1);
+        assert!(history.contains(&asset_id));
+    }
+
+    #[test]
     fn test_get_last_service_no_history() {
         let env = Env::default();
         env.mock_all_auths();
