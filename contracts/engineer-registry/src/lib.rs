@@ -383,6 +383,8 @@ impl EngineerRegistry {
         pending_admin.require_auth();
         env.storage().instance().set(&admin_key(), &pending_admin);
         env.storage().instance().remove(&pending_admin_key());
+        env.events()
+            .publish((symbol_short!("ADMIN_SET"),), (pending_admin,));
     }
 
     /// Admin-only function to pause the contract.
@@ -1885,6 +1887,28 @@ assert_eq!(new_expires_at, previous_expires_at + 86_400);
         client.accept_admin();
 
         assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_accept_admin_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin();
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+
+        let (_, topics, data) = events.get(0).unwrap();
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("ADMIN_SET"));
+
+        let (emitted_admin,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_admin, new_admin);
     }
 
     #[test]
