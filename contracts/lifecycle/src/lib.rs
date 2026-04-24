@@ -683,6 +683,17 @@ impl Lifecycle {
         let weight = get_task_weight(&env, &task_type);
         validate_notes_length(&env, &notes, config.max_notes_length);
 
+        // Check history cap before cross-contract calls to avoid wasting gas
+        let mut history: Vec<MaintenanceRecord> = env
+            .storage()
+            .persistent()
+            .get(&history_key(asset_id))
+            .unwrap_or(Vec::new(&env));
+
+        if history.len() >= config.max_history {
+            panic_with_error!(&env, ContractError::HistoryCapReached);
+        }
+
         // Verify asset exists
         let asset_registry = get_asset_registry_addr(&env);
         verify_asset_exists(&env, &asset_registry, &asset_id);
@@ -692,16 +703,6 @@ impl Lifecycle {
         let registry = engineer_registry::EngineerRegistryClient::new(&env, &registry_id);
         if !registry.verify_engineer(&engineer) {
             panic_with_error!(&env, ContractError::UnauthorizedEngineer);
-        }
-
-        let mut history: Vec<MaintenanceRecord> = env
-            .storage()
-            .persistent()
-            .get(&history_key(asset_id))
-            .unwrap_or(Vec::new(&env));
-
-        if history.len() >= config.max_history {
-            panic_with_error!(&env, ContractError::HistoryCapReached);
         }
 
         let timestamp = env.ledger().timestamp();
@@ -990,10 +991,13 @@ impl Lifecycle {
     /// # Arguments
     /// * `asset_id` - The unique identifier of the asset
     /// * `offset` - Zero-based start index for pagination
-    /// * `limit` - Maximum number of records to return
+    /// * `limit` - Maximum number of records to return (returns empty vec if 0)
     ///
     /// # Returns
     /// Vec containing the requested page of maintenance records
+    ///
+    /// # Panics
+    /// - [`ContractError::IndexOutOfBounds`] if `offset` >= history length
     pub fn get_maintenance_history_page(
         env: Env,
         asset_id: u64,
@@ -1007,8 +1011,11 @@ impl Lifecycle {
             .unwrap_or(Vec::new(&env));
 
         let len = history.len();
-        if offset >= len || limit == 0 {
+        if limit == 0 {
             return Vec::new(&env);
+        }
+        if offset >= len {
+            panic_with_error!(&env, ContractError::IndexOutOfBounds);
         }
 
         let end = (offset + limit).min(len);
@@ -1030,16 +1037,12 @@ impl Lifecycle {
     /// * `asset_id` - The unique identifier of the asset
     ///
     /// # Returns
-    /// The MaintenanceRecord with the highest timestamp for the asset
-    ///
-    /// # Panics
-    /// - [`ContractError::NoMaintenanceHistory`] if no maintenance history exists
-    pub fn get_last_service(env: Env, asset_id: u64) -> MaintenanceRecord {
+    /// `Some(MaintenanceRecord)` with the highest timestamp, or `None` if no history exists
+    pub fn get_last_service(env: Env, asset_id: u64) -> Option<MaintenanceRecord> {
         let history: Vec<MaintenanceRecord> = env
             .storage()
             .persistent()
-            .get(&history_key(asset_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoMaintenanceHistory));
+            .get(&history_key(asset_id))?;
 
         let mut best: Option<MaintenanceRecord> = None;
         for i in 0..history.len() {
@@ -1049,7 +1052,7 @@ impl Lifecycle {
                 best = Some(record);
             }
         }
-        best.unwrap_or_else(|| panic_with_error!(&env, ContractError::NoMaintenanceHistory))
+        best
     }
 
     /// Get the current collateral score for an asset.
@@ -1208,8 +1211,11 @@ impl Lifecycle {
             .unwrap_or_else(|| Vec::new(&env));
 
         let len = history.len();
-        if offset >= len || limit == 0 {
+        if limit == 0 {
             return Vec::new(&env);
+        }
+        if offset >= len {
+            panic_with_error!(&env, ContractError::IndexOutOfBounds);
         }
 
         let end = (offset + limit).min(len);
@@ -1249,6 +1255,16 @@ impl Lifecycle {
             panic_with_error!(&env, ContractError::SameRegistryAddress);
         }
 
+        let eng_registry: Address = env
+            .storage()
+            .instance()
+            .get(&ENG_REGISTRY)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        if new_registry == eng_registry {
+            panic_with_error!(&env, ContractError::InvalidConfig);
+        }
+
+        env.storage().instance().set(&ASSET_REGISTRY, &new_registry);
         set_asset_registry_addr(&env, &new_registry);
 
         env.events()
@@ -1295,6 +1311,16 @@ impl Lifecycle {
             panic_with_error!(&env, ContractError::SameRegistryAddress);
         }
 
+        let asset_registry: Address = env
+            .storage()
+            .instance()
+            .get(&ASSET_REGISTRY)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        if new_registry == asset_registry {
+            panic_with_error!(&env, ContractError::InvalidConfig);
+        }
+
+        env.storage().instance().set(&ENG_REGISTRY, &new_registry);
         set_engineer_registry_addr(&env, &new_registry);
 
         env.events()
@@ -1381,6 +1407,12 @@ impl Lifecycle {
         env.storage()
             .persistent()
             .extend_ttl(&last_update_key(asset_id), 518400, 518400);
+        score_history_push(
+            &env,
+            asset_id,
+            ScoreEntry { timestamp: now, score: 0 },
+            config.max_history,
+        );
 
         env.events().publish((EVENT_RST_SCR, asset_id), (admin, now));
     }
@@ -1682,6 +1714,43 @@ mod tests {
     }
 
     #[test]
+    fn test_history_cap_checked_before_cross_contract_calls() {
+        // When the cap is already reached, HistoryCapReached must fire even if the
+        // engineer is not registered — proving the check happens before cross-contract calls.
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 3);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        for _ in 0..3 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, "ok"),
+                &engineer,
+            );
+        }
+
+        // Use an unregistered engineer — if cap check is first we get HistoryCapReached,
+        // not UnauthorizedEngineer.
+        let unregistered = Address::generate(&env);
+        let result = client.try_submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "over cap"),
+            &unregistered,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::HistoryCapReached as u32,
+            ))),
+        );
+    }
+
+    #[test]
     fn test_submit_maintenance_rejects_empty_task_type() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1881,13 +1950,16 @@ mod tests {
 
         let (client, asset_registry_client, _, _) = setup(&env, 0);
         let asset_id = register_asset(&env, &asset_registry_client);
-        let result = client.try_get_last_service(&asset_id);
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::NoMaintenanceHistory as u32,
-            ))),
-        );
+        assert_eq!(client.get_last_service(&asset_id), None);
+    }
+
+    #[test]
+    fn test_get_last_service_no_asset() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, _) = setup(&env, 0);
+        assert_eq!(client.get_last_service(&9999u64), None);
     }
 
     #[test]
@@ -1917,7 +1989,7 @@ mod tests {
             &engineer,
         );
 
-        let last = client.get_last_service(&asset_id);
+        let last = client.get_last_service(&asset_id).unwrap();
         assert_eq!(last.timestamp, 2000);
         assert_eq!(last.task_type, symbol_short!("INSPECT"));
     }
@@ -3720,7 +3792,7 @@ mod tests {
         assert!(lifecycle.is_collateral_eligible(&asset_id));
 
         // 5. Assert get_last_service returns the correct record
-        let last = lifecycle.get_last_service(&asset_id);
+        let last = lifecycle.get_last_service(&asset_id).unwrap();
         assert_eq!(last.asset_id, asset_id);
         assert_eq!(last.engineer, engineer);
         assert_eq!(last.task_type, symbol_short!("ENGINE"));
@@ -3825,6 +3897,32 @@ mod tests {
         // Admin resets the score
         client.reset_score(&admin, &asset_id);
         assert_eq!(client.get_collateral_score(&asset_id), 0);
+    }
+
+    #[test]
+    fn test_reset_score_appends_zero_to_score_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("ENGINE"),
+            &String::from_str(&env, "Major overhaul"),
+            &engineer,
+        );
+        let history_before = client.get_score_history(&asset_id);
+        assert!(history_before.len() > 0);
+        assert!(history_before.last_unchecked().score > 0);
+
+        client.reset_score(&admin, &asset_id);
+
+        let history_after = client.get_score_history(&asset_id);
+        assert_eq!(history_after.len(), history_before.len() + 1);
+        assert_eq!(history_after.last_unchecked().score, 0);
     }
 
     #[test]
@@ -4195,6 +4293,23 @@ mod tests {
     }
 
     #[test]
+    fn test_update_asset_registry_rejects_same_address_as_engineer_registry() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, engineer_registry_client, admin) = setup(&env, 0);
+        let eng_registry_addr = engineer_registry_client.address.clone();
+
+        let result = client.try_update_asset_registry(&admin, &eng_registry_addr);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidConfig as u32,
+            ))),
+        );
+    }
+
+    #[test]
     fn test_update_engineer_registry_emits_reg_eng_topic() {
         let env = Env::default();
         env.mock_all_auths();
@@ -4398,6 +4513,33 @@ mod tests {
     }
 
     #[test]
+    fn test_get_maintenance_history_page_out_of_bounds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        for _ in 0..3 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, "oil change"),
+                &engineer,
+            );
+        }
+
+        // offset == len (3) -> IndexOutOfBounds
+        let result = client.try_get_maintenance_history_page(&asset_id, &3, &2);
+        assert_eq!(result, Err(Ok(ContractError::IndexOutOfBounds)));
+
+        // offset >> len (10) -> IndexOutOfBounds
+        let result = client.try_get_maintenance_history_page(&asset_id, &10, &2);
+        assert_eq!(result, Err(Ok(ContractError::IndexOutOfBounds)));
+    }
+
+    #[test]
     fn test_get_engineer_maintenance_history_page() {
         let env = Env::default();
         env.mock_all_auths();
@@ -4539,6 +4681,71 @@ mod tests {
             assert!(env.storage().persistent().has(&score_key));
             assert!(env.storage().persistent().has(&score_history_key));
             assert!(env.storage().persistent().has(&last_update_key));
+        });
+    }
+
+    // --- Issue #396: score_history_push sets TTL on first creation and extends on subsequent writes ---
+
+    #[test]
+    fn test_score_history_ttl_set_on_first_creation() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        let score_history_key = (symbol_short!("SCHIST"), asset_id);
+        let contract_id = client.address.clone();
+
+        // Key must not exist before first maintenance
+        env.as_contract(&contract_id, || {
+            assert!(!env.storage().persistent().has(&score_history_key));
+        });
+
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "first"),
+            &engineer,
+        );
+
+        // After first write the key must exist (TTL was set)
+        env.as_contract(&contract_id, || {
+            assert!(env.storage().persistent().has(&score_history_key));
+        });
+    }
+
+    #[test]
+    fn test_score_history_ttl_extended_on_subsequent_writes() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        let score_history_key = (symbol_short!("SCHIST"), asset_id);
+        let contract_id = client.address.clone();
+
+        // First write — creates the entry
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "first"),
+            &engineer,
+        );
+
+        // Second write — extends TTL on an existing entry
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "second"),
+            &engineer,
+        );
+
+        env.as_contract(&contract_id, || {
+            assert!(env.storage().persistent().has(&score_history_key));
         });
     }
 
@@ -4774,7 +4981,7 @@ mod tests {
         assert_eq!(asset_registry.get_asset(&asset_id).owner, new_owner);
         assert_eq!(lifecycle.get_collateral_score(&asset_id), 50);
         assert!(lifecycle.is_collateral_eligible(&asset_id));
-        assert_eq!(lifecycle.get_last_service(&asset_id).engineer, engineer);
+        assert_eq!(lifecycle.get_last_service(&asset_id).unwrap().engineer, engineer);
     }
 
     #[test]

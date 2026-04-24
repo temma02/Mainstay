@@ -157,7 +157,7 @@ revoke_credential(engineer_address)
 ```rust
 submit_maintenance(asset_id, task_type, notes, engineer_signature)
 get_maintenance_history(asset_id) -> Vec<MaintenanceRecord>
-get_last_service(asset_id) -> MaintenanceRecord
+get_last_service(asset_id) -> Option<MaintenanceRecord>
 ```
 
 ### Collateral
