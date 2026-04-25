@@ -383,6 +383,7 @@ impl Lifecycle {
         }
         env.storage().instance().set(&PAUSED_KEY, &true);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
+        env.events().publish((symbol_short!("PAUSED"),), (admin,));
     }
 
     /// Admin-only function to unpause the contract.
@@ -405,6 +406,7 @@ impl Lifecycle {
         }
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
+        env.events().publish((symbol_short!("UNPAUSED"),), (admin,));
     }
 
     /// Check if the contract is currently paused.
@@ -1562,7 +1564,7 @@ mod tests {
     use soroban_sdk::{
         symbol_short,
         testutils::{storage::Persistent as _, Address as _, Events, Ledger},
-        BytesN, Env, String, TryIntoVal,
+        BytesN, Env, String, Symbol, TryIntoVal,
     };
 
     fn setup<'a>(
@@ -4842,6 +4844,41 @@ mod tests {
                 ContractError::Paused as u32
             )))
         );
+    }
+
+    #[test]
+    fn test_pause_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, admin) = setup(&env, 0);
+        client.pause(&admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data) = events.get(0).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("PAUSED"));
+        let (emitted_admin,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_admin, admin);
+    }
+
+    #[test]
+    fn test_unpause_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, admin) = setup(&env, 0);
+        client.pause(&admin);
+        client.unpause(&admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data) = events.get(0).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("UNPAUSED"));
+        let (emitted_admin,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_admin, admin);
     }
 
     #[test]

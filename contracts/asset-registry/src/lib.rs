@@ -472,6 +472,7 @@ impl AssetRegistry {
         }
         env.storage().instance().set(&PAUSED_KEY, &true);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
+        env.events().publish((symbol_short!("PAUSED"),), (admin,));
     }
 
     /// Admin-only function to unpause the contract.
@@ -486,6 +487,7 @@ impl AssetRegistry {
         }
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
+        env.events().publish((symbol_short!("UNPAUSED"),), (admin,));
     }
 
     /// Check if the contract is currently paused.
@@ -1858,6 +1860,49 @@ mod tests {
         client.unpause(&admin);
         let id3 = client.batch_register_assets(&owner, &Vec::new(&env));
         assert_eq!(id3.len(), 0);
+    }
+
+    #[test]
+    fn test_pause_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.pause(&admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data) = events.get(0).unwrap();
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("PAUSED"));
+        let (emitted_admin,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_admin, admin);
+    }
+
+    #[test]
+    fn test_unpause_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.pause(&admin);
+        client.unpause(&admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data) = events.get(0).unwrap();
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("UNPAUSED"));
+        let (emitted_admin,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_admin, admin);
     }
 
     #[test]
