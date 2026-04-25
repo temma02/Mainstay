@@ -125,6 +125,9 @@ impl EngineerRegistry {
         if credential_hash == BytesN::from_array(&env, &[0u8; 32]) {
             panic_with_error!(&env, ContractError::InvalidCredentialHash);
         }
+        if validity_period == 0 {
+            panic_with_error!(&env, ContractError::InvalidValidityPeriod);
+        }
 
         // Check if engineer already has an active record
         if let Some(existing) = env
@@ -153,13 +156,15 @@ impl EngineerRegistry {
             .persistent()
             .extend_ttl(&engineer_key(&engineer), 518400, 518400);
 
-        // Track issuer → engineers mapping
+        // Track issuer → engineers mapping (avoid duplicates on re-registration after revoke)
         let mut list: Vec<Address> = env
             .storage()
             .persistent()
             .get(&issuer_engineers_key(&issuer))
             .unwrap_or(Vec::new(&env));
-        list.push_back(engineer.clone());
+        if !list.contains(engineer.clone()) {
+            list.push_back(engineer.clone());
+        }
         env.storage()
             .persistent()
             .set(&issuer_engineers_key(&issuer), &list);
@@ -421,6 +426,7 @@ impl EngineerRegistry {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
         env.storage().instance().set(&PAUSED_KEY, &true);
+        env.storage().instance().extend_ttl(518400, 518400);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.events().publish((symbol_short!("PAUSED"),), (admin,));
     }
@@ -436,6 +442,7 @@ impl EngineerRegistry {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
         env.storage().instance().set(&PAUSED_KEY, &false);
+        env.storage().instance().extend_ttl(518400, 518400);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.events().publish((symbol_short!("UNPAUSED"),), (admin,));
     }
@@ -548,6 +555,30 @@ impl EngineerRegistry {
         }
         env.storage().instance().set(&issuer_list_key(), &new_list);
         env.storage().instance().extend_ttl(518400, 518400);
+
+        // Revoke all active engineers registered by this issuer
+        let engineers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&issuer_engineers_key(&issuer))
+            .unwrap_or(Vec::new(&env));
+        for engineer in engineers.iter() {
+            if let Some(mut record) = env
+                .storage()
+                .persistent()
+                .get::<_, Engineer>(&engineer_key(&engineer))
+            {
+                if record.active {
+                    record.active = false;
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&engineer_key(&engineer), 518400, 518400);
+                    env.storage()
+                        .persistent()
+                        .set(&engineer_key(&engineer), &record);
+                }
+            }
+        }
 
         env.events()
             .publish((symbol_short!("ISS_RM"), admin.clone()), (issuer,));
@@ -1475,7 +1506,7 @@ mod tests {
 
         // Advance past original expiry
         env.ledger()
-            .with_mut(|li| li.timestamp = li.timestamp + 1001);
+            .with_mut(|li| li.timestamp = li.timestamp + 86_401);
         assert!(!client.verify_engineer(&engineer));
 
         // Renew for another 86_400 seconds from now
@@ -1922,6 +1953,29 @@ assert_eq!(new_expires_at, previous_expires_at + 86_400);
         let new_hash = BytesN::from_array(&env, &[2u8; 32]);
         client.register_engineer(&engineer, &new_hash, &issuer, &31_536_000);
         assert!(client.verify_engineer(&engineer));
+    }
+
+    #[test]
+    fn test_no_duplicate_in_issuer_list_after_reregistration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+        client.revoke_credential(&engineer);
+
+        let new_hash = BytesN::from_array(&env, &[2u8; 32]);
+        client.register_engineer(&engineer, &new_hash, &issuer, &31_536_000);
+
+        // Engineer address must appear exactly once in the issuer's list
+        let list = client.get_engineers_by_issuer(&issuer);
+        let count = list.iter().filter(|a| *a == engineer).count();
+        assert_eq!(count, 1, "Engineer address must not be duplicated after re-registration");
     }
 
     #[test]
