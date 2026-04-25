@@ -136,7 +136,7 @@ fn owner_index_remove(env: &Env, owner: &Address, asset_id: u64) {
 }
 
 fn is_paused(env: &Env) -> bool {
-    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+    env.storage().persistent().get(&PAUSED_KEY).unwrap_or(false)
 }
 
 fn ensure_not_paused(env: &Env) {
@@ -470,6 +470,8 @@ impl AssetRegistry {
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
+        env.storage().persistent().set(&PAUSED_KEY, &true);
+        env.storage().persistent().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.storage().instance().set(&PAUSED_KEY, &true);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.events().publish((symbol_short!("PAUSED"),), (admin,));
@@ -485,6 +487,8 @@ impl AssetRegistry {
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
+        env.storage().persistent().set(&PAUSED_KEY, &false);
+        env.storage().persistent().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.events().publish((symbol_short!("UNPAUSED"),), (admin,));
@@ -2424,6 +2428,47 @@ mod tests {
         assert_eq!(
             result,
             Err(Ok(ContractError::EmptyMetadata.into()))
+        );
+    }
+
+    #[test]
+    fn test_pause_state_persists_across_instance_ttl_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        // Pause the contract
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        // Simulate instance TTL expiry by wiping instance storage
+        env.as_contract(&contract_id, || {
+            env.storage().instance().remove(&ADMIN_KEY);
+            env.storage().instance().remove(&PENDING_ADMIN_KEY);
+        });
+
+        // PAUSED_KEY lives in persistent storage — must still be true
+        assert!(
+            client.is_paused(),
+            "pause state must survive instance TTL expiry"
+        );
+
+        // Writes must still be blocked
+        let owner = Address::generate(&env);
+        assert_eq!(
+            client.try_register_asset(
+                &symbol_short!("GENSET"),
+                &String::from_str(&env, "test asset"),
+                &owner,
+            ),
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32
+            )))
         );
     }
 }

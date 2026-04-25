@@ -54,7 +54,7 @@ const REVOKE_TOPIC: Symbol = symbol_short!("REV_CRED");
 const MIN_VALIDITY_PERIOD: u64 = 86_400;
 
 fn is_paused(env: &Env) -> bool {
-    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+    env.storage().persistent().get(&PAUSED_KEY).unwrap_or(false)
 }
 
 fn ensure_not_paused(env: &Env) {
@@ -425,6 +425,8 @@ impl EngineerRegistry {
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
+        env.storage().persistent().set(&PAUSED_KEY, &true);
+        env.storage().persistent().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.storage().instance().set(&PAUSED_KEY, &true);
         env.storage().instance().extend_ttl(518400, 518400);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
@@ -441,6 +443,8 @@ impl EngineerRegistry {
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
+        env.storage().persistent().set(&PAUSED_KEY, &false);
+        env.storage().persistent().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().extend_ttl(518400, 518400);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
@@ -2193,5 +2197,41 @@ assert_eq!(new_expires_at, previous_expires_at + 86_400);
             },
         }]);
         assert!(client.try_accept_admin().is_err());
+    }
+
+    #[test]
+    fn test_pause_state_persists_across_instance_ttl_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        client.add_trusted_issuer(&admin, &issuer);
+
+        // Pause the contract
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        // Simulate instance TTL expiry by wiping instance storage
+        env.as_contract(&client.address, || {
+            env.storage().instance().remove(&admin_key());
+            env.storage().instance().remove(&pending_admin_key());
+        });
+
+        // PAUSED_KEY lives in persistent storage — must still be true
+        assert!(
+            client.is_paused(),
+            "pause state must survive instance TTL expiry"
+        );
+
+        // Writes must still be blocked
+        let engineer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        assert_eq!(
+            client.try_register_engineer(&engineer, &hash, &issuer, &31_536_000),
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32
+            )))
+        );
     }
 }

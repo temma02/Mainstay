@@ -176,7 +176,7 @@ fn is_zero_address(env: &Env, addr: &Address) -> bool {
 }
 
 fn is_paused(env: &Env) -> bool {
-    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+    env.storage().persistent().get(&PAUSED_KEY).unwrap_or(false)
 }
 
 fn ensure_not_paused(env: &Env) {
@@ -409,6 +409,8 @@ impl Lifecycle {
         if config.admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
+        env.storage().persistent().set(&PAUSED_KEY, &true);
+        env.storage().persistent().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.storage().instance().set(&PAUSED_KEY, &true);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.events().publish((symbol_short!("PAUSED"),), (admin,));
@@ -432,6 +434,8 @@ impl Lifecycle {
         if config.admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
+        env.storage().persistent().set(&PAUSED_KEY, &false);
+        env.storage().persistent().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.events().publish((symbol_short!("UNPAUSED"),), (admin,));
@@ -1207,11 +1211,7 @@ impl Lifecycle {
     /// - [`ContractError::AssetNotFound`] if the asset does not exist
     pub fn is_collateral_eligible(env: Env, asset_id: u64) -> bool {
         // Verify asset exists before checking eligibility
-        let asset_registry: Address = env
-            .storage()
-            .instance()
-            .get(&ASSET_REGISTRY)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        let asset_registry = get_asset_registry_addr(&env);
         let asset_registry_client = asset_registry::AssetRegistryClient::new(&env, &asset_registry);
         asset_registry_client.get_asset(&asset_id);
 
@@ -1323,16 +1323,6 @@ impl Lifecycle {
             panic_with_error!(&env, ContractError::SameRegistryAddress);
         }
 
-        let eng_registry: Address = env
-            .storage()
-            .instance()
-            .get(&ENG_REGISTRY)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        if new_registry == eng_registry {
-            panic_with_error!(&env, ContractError::InvalidConfig);
-        }
-
-        env.storage().instance().set(&ASSET_REGISTRY, &new_registry);
         set_asset_registry_addr(&env, &new_registry);
 
         env.events()
@@ -1379,16 +1369,6 @@ impl Lifecycle {
             panic_with_error!(&env, ContractError::SameRegistryAddress);
         }
 
-        let asset_registry: Address = env
-            .storage()
-            .instance()
-            .get(&ASSET_REGISTRY)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        if new_registry == asset_registry {
-            panic_with_error!(&env, ContractError::InvalidConfig);
-        }
-
-        env.storage().instance().set(&ENG_REGISTRY, &new_registry);
         set_engineer_registry_addr(&env, &new_registry);
 
         env.events()
@@ -4290,7 +4270,6 @@ mod tests {
         // Simulate instance TTL expiration by clearing instance storage keys
         env.as_contract(&lifecycle_id, || {
             env.storage().instance().remove(&CONFIG);
-            env.storage().instance().remove(&PAUSED_KEY);
         });
 
         // After instance TTL expiry, registry addresses should still be readable
@@ -5023,17 +5002,45 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let (client, _, _, admin) = setup(&env, 0);
+        let lifecycle_id = env.register(Lifecycle, ());
+        let asset_registry_id = env.register(AssetRegistry, ());
+        let engineer_registry_id = env.register(EngineerRegistry, ());
+        let admin = Address::generate(&env);
+
+        let client = LifecycleClient::new(&env, &lifecycle_id);
+        client.initialize(&asset_registry_id, &engineer_registry_id, &admin, &0u32);
 
         // Pause the contract
         client.pause(&admin);
         assert!(client.is_paused());
 
-        // Simulate TTL boundary by assuming instance storage TTL expires
-        // In a real scenario, if TTL expired without extension, is_paused would return false
-        // But since we extend TTL on every write, the pause state persists
-        // Here we verify the state is still paused after the operation that extended TTL
-        assert!(client.is_paused());
+        // Simulate instance TTL expiry — PAUSED_KEY must survive because it is in persistent storage
+        env.as_contract(&lifecycle_id, || {
+            // Wipe all instance storage to mimic TTL expiration
+            env.storage().instance().remove(&PENDING_ADMIN_KEY);
+        });
+
+        // Pause state must still be true after instance TTL boundary
+        assert!(
+            client.is_paused(),
+            "pause state must survive instance TTL expiry"
+        );
+
+        // submit_maintenance must still be blocked
+        let (_, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+        assert_eq!(
+            client.try_submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, "should be blocked"),
+                &engineer,
+            ),
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::Paused as u32
+            )))
+        );
     }
 
     #[test]
