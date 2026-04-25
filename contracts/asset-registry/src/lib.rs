@@ -456,6 +456,8 @@ impl AssetRegistry {
         }
         env.storage().instance().set(&ADMIN_KEY, &pending_admin);
         env.storage().instance().remove(&PENDING_ADMIN_KEY);
+        env.events()
+            .publish((symbol_short!("ADMIN_SET"),), (pending_admin,));
     }
 
     /// Admin-only function to pause the contract.
@@ -470,6 +472,7 @@ impl AssetRegistry {
         }
         env.storage().instance().set(&PAUSED_KEY, &true);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
+        env.events().publish((symbol_short!("PAUSED"),), (admin,));
     }
 
     /// Admin-only function to unpause the contract.
@@ -484,6 +487,7 @@ impl AssetRegistry {
         }
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
+        env.events().publish((symbol_short!("UNPAUSED"),), (admin,));
     }
 
     /// Check if the contract is currently paused.
@@ -1005,6 +1009,31 @@ mod tests {
         client.accept_admin(&new_admin);
 
         assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_accept_admin_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        // propose_admin emits PROP_ADM; accept_admin must emit ADMIN_SET
+        let events = env.events().all();
+        let (_, topics, data) = events.last().unwrap();
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("ADMIN_SET"));
+
+        let (emitted_admin,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_admin, new_admin);
     }
 
     #[test]
@@ -1834,6 +1863,49 @@ mod tests {
     }
 
     #[test]
+    fn test_pause_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.pause(&admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data) = events.get(0).unwrap();
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("PAUSED"));
+        let (emitted_admin,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_admin, admin);
+    }
+
+    #[test]
+    fn test_unpause_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.pause(&admin);
+        client.unpause(&admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data) = events.get(0).unwrap();
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("UNPAUSED"));
+        let (emitted_admin,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_admin, admin);
+    }
+
+    #[test]
     fn test_pause_affects_all_state_changes() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1959,11 +2031,41 @@ mod tests {
             metadata: String::from_str(&env, "B"),
         });
 
-        client.batch_register_assets(&owner, &batch);
+        let ids = client.batch_register_assets(&owner, &batch);
 
-        // Check that batch event is emitted
+        // 2 REG_AST + 1 BATCH_REG
         let events = env.events().all();
-        assert_eq!(events.len(), 3); // 2 REG_AST + 1 BATCH_REG
+        assert_eq!(events.len(), 3);
+
+        // Last event must be the BATCH_REG with the correct topic and assigned IDs
+        let (_, topics, data) = events.last().unwrap();
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let t1: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("BATCH_REG"));
+        assert_eq!(t1, owner);
+
+        let (emitted_ids, _timestamp): (Vec<u64>, u64) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_ids.len(), 2);
+        assert_eq!(emitted_ids.get(0).unwrap(), ids.get(0).unwrap());
+        assert_eq!(emitted_ids.get(1).unwrap(), ids.get(1).unwrap());
+    }
+
+    #[test]
+    fn test_batch_register_assets_empty_emits_no_batch_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let owner = Address::generate(&env);
+        client.batch_register_assets(&owner, &Vec::new(&env));
+
+        // Empty batch — no events at all
+        assert_eq!(env.events().all().len(), 0);
     }
 
     #[test]

@@ -24,3 +24,6 @@ Thumbs.db
 
 # Wasm build output
 *.wasm
+
+# Rust
+Cargo.lock
