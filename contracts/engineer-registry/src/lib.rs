@@ -21,6 +21,7 @@ pub enum ContractError {
     IssuerNotFound = 11,
     PendingAdminAlreadyExists = 12,
     InvalidValidityPeriod = 13,
+    IssuerRemoved = 14,
 }
 
 #[contracttype]
@@ -239,7 +240,7 @@ impl EngineerRegistry {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::EngineerNotFound));
         record.issuer.require_auth();
         if !env.storage().instance().has(&trusted_key(&record.issuer)) {
-            panic_with_error!(&env, ContractError::UntrustedIssuer);
+            panic_with_error!(&env, ContractError::IssuerRemoved);
         }
         if !record.active {
             panic_with_error!(&env, ContractError::CredentialRevoked);
@@ -1504,6 +1505,31 @@ assert_eq!(renewed.expires_at, original.expires_at + 86_400);
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
                 ContractError::CredentialRevoked as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_renew_credential_fails_when_issuer_removed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+
+        // Remove the issuer after registration
+        client.remove_trusted_issuer(&admin, &issuer);
+
+        let result = client.try_renew_credential(&engineer, &31_536_000);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::IssuerRemoved as u32,
             ))),
         );
     }
