@@ -2031,11 +2031,41 @@ mod tests {
             metadata: String::from_str(&env, "B"),
         });
 
-        client.batch_register_assets(&owner, &batch);
+        let ids = client.batch_register_assets(&owner, &batch);
 
-        // Check that batch event is emitted
+        // 2 REG_AST + 1 BATCH_REG
         let events = env.events().all();
-        assert_eq!(events.len(), 3); // 2 REG_AST + 1 BATCH_REG
+        assert_eq!(events.len(), 3);
+
+        // Last event must be the BATCH_REG with the correct topic and assigned IDs
+        let (_, topics, data) = events.last().unwrap();
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let t1: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("BATCH_REG"));
+        assert_eq!(t1, owner);
+
+        let (emitted_ids, _timestamp): (Vec<u64>, u64) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_ids.len(), 2);
+        assert_eq!(emitted_ids.get(0).unwrap(), ids.get(0).unwrap());
+        assert_eq!(emitted_ids.get(1).unwrap(), ids.get(1).unwrap());
+    }
+
+    #[test]
+    fn test_batch_register_assets_empty_emits_no_batch_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let owner = Address::generate(&env);
+        client.batch_register_assets(&owner, &Vec::new(&env));
+
+        // Empty batch — no events at all
+        assert_eq!(env.events().all().len(), 0);
     }
 
     #[test]
