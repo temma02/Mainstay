@@ -357,6 +357,7 @@ impl EngineerRegistry {
             panic_with_error!(&env, ContractError::AdminAlreadyInitialized);
         }
         env.storage().instance().set(&admin_key(), &admin);
+        env.storage().instance().extend_ttl(518400, 518400);
     }
 
     /// Get the current admin address of the contract.
@@ -827,6 +828,22 @@ mod tests {
 
         // Verify admin was set
         assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    fn test_initialize_admin_extends_instance_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EngineerRegistry, ());
+        let client = EngineerRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let ttl = env.as_contract(&contract_id, || {
+            env.storage().instance().get_ttl()
+        });
+        assert!(ttl > 0, "Instance TTL should be extended after initialize_admin");
     }
 
     #[test]
