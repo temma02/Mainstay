@@ -118,6 +118,10 @@ fn owner_index_remove(env: &Env, owner: &Address, asset_id: u64) {
             owner.clone(),
             asset_id
         );
+        env.events().publish(
+            (symbol_short!("IDX_MISS"), owner.clone()),
+            asset_id,
+        );
         return;
     }
     let ids: Vec<u64> = env
@@ -338,10 +342,16 @@ impl AssetRegistry {
 
     /// Returns all asset IDs owned by the given address.
     pub fn get_assets_by_owner(env: Env, owner: Address) -> Vec<u64> {
-        env.storage()
+        let key = owner_index_key(&owner);
+        let ids: Vec<u64> = env
+            .storage()
             .persistent()
-            .get(&owner_index_key(&owner))
-            .unwrap_or_else(|| Vec::new(&env))
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        }
+        ids
     }
 
     /// Returns a paginated list of asset IDs owned by the given address.
@@ -473,7 +483,7 @@ impl AssetRegistry {
         env.storage().persistent().set(&PAUSED_KEY, &true);
         env.storage().persistent().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.storage().instance().set(&PAUSED_KEY, &true);
-        env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
+        env.storage().instance().extend_ttl(518400, 518400);
         env.events().publish((symbol_short!("PAUSED"),), (admin,));
     }
 
@@ -490,7 +500,7 @@ impl AssetRegistry {
         env.storage().persistent().set(&PAUSED_KEY, &false);
         env.storage().persistent().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.storage().instance().set(&PAUSED_KEY, &false);
-        env.storage().instance().extend_ttl(&PAUSED_KEY, 518400, 518400);
+        env.storage().instance().extend_ttl(518400, 518400);
         env.events().publish((symbol_short!("UNPAUSED"),), (admin,));
     }
 
@@ -710,7 +720,7 @@ impl AssetRegistry {
 
         #[cfg(not(test))]
         {
-            env.deployer().update_current_contract_wasm(new_wasm_hash);
+            env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
         }
 
         env.events().publish(
@@ -731,8 +741,11 @@ impl AssetRegistry {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
         env.storage()
-            .instance()
+            .persistent()
             .set(&asset_type_key(&asset_type), &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&asset_type_key(&asset_type), 518400, 518400);
         env.events().publish((ADD_TYPE_TOPIC,), (asset_type,));
     }
 
@@ -760,7 +773,7 @@ impl AssetRegistry {
             panic_with_error!(&env, ContractError::TypeInUse);
         }
         env.storage()
-            .instance()
+            .persistent()
             .remove(&asset_type_key(&asset_type));
         env.events().publish((RM_TYPE_TOPIC,), (asset_type,));
     }
@@ -774,7 +787,7 @@ impl AssetRegistry {
     /// `true` if valid; `false` otherwise
     pub fn is_valid_asset_type(env: Env, asset_type: Symbol) -> bool {
         env.storage()
-            .instance()
+            .persistent()
             .get(&asset_type_key(&asset_type))
             .unwrap_or(false)
     }
@@ -1578,6 +1591,48 @@ mod tests {
         let new_owner_ids = client.get_assets_by_owner(&new_owner);
         assert_eq!(new_owner_ids.len(), 1);
         assert!(new_owner_ids.contains(&transferred_id));
+    }
+
+    #[test]
+    fn test_owner_index_remove_missing_key_emits_diagnostic_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        // Remove the owner index to simulate expiry
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().remove(&owner_index_key(&owner));
+        });
+
+        // Trigger owner_index_remove via deregister
+        client.deregister_asset(&admin, &id);
+
+        // Verify the IDX_MISS diagnostic event was emitted
+        let events = env.events().all();
+        let idx_miss_event = events.iter().find(|(_, topics, _)| {
+            use soroban_sdk::TryIntoVal;
+            topics
+                .get(0)
+                .and_then(|v| {
+                    let s: Result<Symbol, _> = v.try_into_val(&env);
+                    s.ok()
+                })
+                .map(|s| s == symbol_short!("IDX_MISS"))
+                .unwrap_or(false)
+        });
+        assert!(idx_miss_event.is_some(), "IDX_MISS diagnostic event must be emitted when owner index is missing");
     }
 
     #[test]
@@ -2470,5 +2525,84 @@ mod tests {
                 ContractError::Paused as u32
             )))
         );
+    }
+
+    // --- Issue #381: is_valid_asset_type survives instance TTL expiry ---
+
+    #[test]
+    fn test_is_valid_asset_type_survives_instance_ttl_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        // Simulate instance TTL expiry by wiping all instance storage
+        env.as_contract(&contract_id, || {
+            env.storage().instance().remove(&ADMIN_KEY);
+        });
+
+        // Asset type lives in persistent storage — must still be valid
+        assert!(
+            client.is_valid_asset_type(&symbol_short!("GENSET")),
+            "asset type must remain valid after instance TTL expiry"
+        );
+    }
+
+    // --- Issue #382: add_asset_type and remove_asset_type extend TTL ---
+
+    #[test]
+    fn test_add_asset_type_extends_persistent_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        env.as_contract(&contract_id, || {
+            let ttl = env
+                .storage()
+                .persistent()
+                .get_ttl(&asset_type_key(&symbol_short!("GENSET")));
+            assert!(ttl > 0, "asset type key TTL must be extended after add_asset_type");
+        });
+    }
+
+    // --- Issue #383: get_assets_by_owner extends TTL on read ---
+
+    #[test]
+    fn test_get_assets_by_owner_extends_ttl_on_read() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+        client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        // Read via get_assets_by_owner — TTL must be extended
+        client.get_assets_by_owner(&owner);
+
+        env.as_contract(&contract_id, || {
+            let ttl = env
+                .storage()
+                .persistent()
+                .get_ttl(&owner_index_key(&owner));
+            assert!(ttl > 0, "owner index TTL must be extended on read");
+        });
     }
 }
