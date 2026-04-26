@@ -228,6 +228,9 @@ fn apply_decay(
         .unwrap_or(0u32);
 
     if current_score == 0 {
+        env.storage()
+            .persistent()
+            .extend_ttl(&last_update_key(asset_id), 518400, 518400);
         return 0;
     }
 
@@ -2652,6 +2655,30 @@ mod tests {
 
         // Asset ID 9999 was never registered; score_key is absent ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ unwrap_or(0) ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ early return
         assert_eq!(client.decay_score(&9999u64), 0);
+
+    #[test]
+    fn test_apply_decay_extends_last_update_ttl_when_score_is_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, _, _) = setup(&env, 0);
+        let owner = Address::generate(&env);
+        let asset_id = asset_registry_client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "Zero-score asset"),
+            &owner,
+        );
+
+        // Score is 0 (never maintained) — early-return path fires
+        assert_eq!(client.decay_score(&asset_id), 0);
+
+        let contract_id = client.address.clone();
+        let ttl = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&last_update_key(asset_id))
+        });
+        assert!(ttl > 0, "last_update_key TTL should be extended even when score is 0");
     }
 
     #[test]
