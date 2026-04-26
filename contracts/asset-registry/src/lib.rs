@@ -183,7 +183,7 @@ impl AssetRegistry {
             panic_with_error!(&env, ContractError::DuplicateAsset);
         }
 
-        let id: u64 = env.storage().instance().get(&ASSET_COUNT).unwrap_or(0) + 1;
+        let id: u64 = env.storage().persistent().get(&ASSET_COUNT).unwrap_or(0) + 1;
         let asset = Asset {
             asset_id: id,
             asset_type: asset_type.clone(),
@@ -196,7 +196,8 @@ impl AssetRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&asset_key(id), 518400, 518400); // Extend TTL for persistent storage entries to prevent data loss
-        env.storage().instance().set(&ASSET_COUNT, &id);
+        env.storage().persistent().set(&ASSET_COUNT, &id);
+        env.storage().persistent().extend_ttl(&ASSET_COUNT, 518400, 518400);
         env.storage().persistent().set(&dk, &id);
 
         // Update owner index
@@ -229,7 +230,7 @@ impl AssetRegistry {
         let mut ids: Vec<u64> = Vec::new(&env);
         let mut batch_hashes: Vec<BytesN<32>> = Vec::new(&env);
 
-        let mut next_id: u64 = env.storage().instance().get(&ASSET_COUNT).unwrap_or(0);
+        let mut next_id: u64 = env.storage().persistent().get(&ASSET_COUNT).unwrap_or(0);
 
         for asset_in in assets.iter() {
             if !Self::is_valid_asset_type(env.clone(), asset_in.asset_type.clone()) {
@@ -292,8 +293,9 @@ impl AssetRegistry {
             ids.push_back(id);
         }
 
-        if next_id > env.storage().instance().get(&ASSET_COUNT).unwrap_or(0) {
-            env.storage().instance().set(&ASSET_COUNT, &next_id);
+        if next_id > env.storage().persistent().get(&ASSET_COUNT).unwrap_or(0) {
+            env.storage().persistent().set(&ASSET_COUNT, &next_id);
+            env.storage().persistent().extend_ttl(&ASSET_COUNT, 518400, 518400);
         }
 
         // Ensure owner index TTL is extended after all batch writes
@@ -378,7 +380,7 @@ impl AssetRegistry {
     /// # Returns
     /// The total number of assets that have been registered
     pub fn asset_count(env: Env) -> u64 {
-        env.storage().instance().get(&ASSET_COUNT).unwrap_or(0)
+        env.storage().persistent().get(&ASSET_COUNT).unwrap_or(0)
     }
 
     /// Initialize the admin address for the contract.
@@ -2457,6 +2459,47 @@ mod tests {
             result,
             Err(Ok(ContractError::EmptyMetadata.into()))
         );
+    }
+
+    #[test]
+    fn test_asset_count_survives_instance_ttl_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+        let id1 = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "Asset One"),
+            &owner,
+        );
+        assert_eq!(id1, 1);
+        assert_eq!(client.asset_count(), 1);
+
+        // Simulate instance storage TTL expiry by wiping instance keys
+        env.as_contract(&contract_id, || {
+            env.storage().instance().remove(&ADMIN_KEY);
+        });
+
+        // ASSET_COUNT lives in persistent storage — must still return 1
+        assert_eq!(
+            client.asset_count(),
+            1,
+            "asset_count must survive instance TTL expiry"
+        );
+
+        // Next registration must get ID 2, not 1 (no collision)
+        let id2 = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "Asset Two"),
+            &owner,
+        );
+        assert_eq!(id2, 2, "ID assignment must be consistent after instance TTL expiry");
     }
 
     #[test]
