@@ -487,10 +487,7 @@ impl AssetRegistry {
         env.storage().persistent().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.storage().instance().set(&PAUSED_KEY, &true);
         env.storage().instance().extend_ttl(518400, 518400);
-<<<<<<< fix/ci-compile-errors-instance-extend-ttl
-=======
         env.events().publish((symbol_short!("PAUSED"),), (admin,));
->>>>>>> main
     }
 
     /// Admin-only function to unpause the contract.
@@ -507,10 +504,7 @@ impl AssetRegistry {
         env.storage().persistent().extend_ttl(&PAUSED_KEY, 518400, 518400);
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().extend_ttl(518400, 518400);
-<<<<<<< fix/ci-compile-errors-instance-extend-ttl
-=======
         env.events().publish((symbol_short!("UNPAUSED"),), (admin,));
->>>>>>> main
     }
 
     /// Check if the contract is currently paused.
