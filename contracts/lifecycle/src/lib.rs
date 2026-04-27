@@ -1165,7 +1165,13 @@ impl Lifecycle {
     ///
     /// # Returns
     /// Vec of ScoreEntry containing the complete score trend
+    ///
+    /// # Panics
+    /// - [`ContractError::NotInitialized`] if contract has not been initialized
+    /// - [`ContractError::AssetNotFound`] if the asset does not exist
     pub fn get_score_history(env: Env, asset_id: u64) -> Vec<ScoreEntry> {
+        let asset_registry = get_asset_registry_addr(&env);
+        verify_asset_exists(&env, &asset_registry, &asset_id);
         env.storage()
             .persistent()
             .get(&score_history_key(asset_id))
@@ -1181,7 +1187,13 @@ impl Lifecycle {
     ///
     /// # Returns
     /// Vec containing the last `n` score entries (or fewer if history is shorter)
+    ///
+    /// # Panics
+    /// - [`ContractError::NotInitialized`] if contract has not been initialized
+    /// - [`ContractError::AssetNotFound`] if the asset does not exist
     pub fn get_score_trend(env: Env, asset_id: u64, n: u32) -> Vec<ScoreEntry> {
+        let asset_registry = get_asset_registry_addr(&env);
+        verify_asset_exists(&env, &asset_registry, &asset_id);
         if n == 0 {
             return Vec::new(&env);
         }
@@ -1241,7 +1253,13 @@ impl Lifecycle {
     }
 
     /// Returns the timestamp of the most recent maintenance event, or None if no maintenance has been submitted.
+    ///
+    /// # Panics
+    /// - [`ContractError::NotInitialized`] if contract has not been initialized
+    /// - [`ContractError::AssetNotFound`] if the asset does not exist
     pub fn get_last_service_timestamp(env: Env, asset_id: u64) -> Option<u64> {
+        let asset_registry = get_asset_registry_addr(&env);
+        verify_asset_exists(&env, &asset_registry, &asset_id);
         env.storage().persistent().get(&last_update_key(asset_id))
     }
 
@@ -1262,12 +1280,28 @@ impl Lifecycle {
     /// * `engineer` - The address of the engineer to query
     ///
     /// # Returns
-    /// A Vec containing all asset IDs this engineer has worked on
+    /// A Vec containing all asset IDs this engineer has worked on (capped at 100 entries)
+    ///
+    /// # Note
+    /// For engineers with large maintenance histories, use [`get_eng_history_page`] for pagination
+    /// to avoid high deserialization costs.
     pub fn get_engineer_maintenance_history(env: Env, engineer: Address) -> Vec<u64> {
-        env.storage()
+        let history: Vec<u64> = env
+            .storage()
             .persistent()
             .get(&engineer_history_key(&engineer))
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        
+        let len = history.len();
+        if len <= 100 {
+            return history;
+        }
+        
+        let mut result = Vec::new(&env);
+        for i in 0..100u32 {
+            result.push_back(history.get(i).unwrap());
+        }
+        result
     }
 
     /// Get a paginated list of asset IDs that an engineer has worked on.
@@ -4291,6 +4325,97 @@ mod tests {
             &engineer,
         );
         assert_eq!(client.get_last_service_timestamp(&asset_id), Some(t1));
+    }
+
+    #[test]
+    fn test_get_score_history_nonexistent_asset_returns_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, _) = setup(&env, 0);
+        let result = client.try_get_score_history(&999u64);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                asset_registry::ContractError::AssetNotFound as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_get_score_trend_nonexistent_asset_returns_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, _) = setup(&env, 0);
+        let result = client.try_get_score_trend(&999u64, &10u32);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                asset_registry::ContractError::AssetNotFound as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_get_last_service_timestamp_nonexistent_asset_returns_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, _) = setup(&env, 0);
+        let result = client.try_get_last_service_timestamp(&999u64);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                asset_registry::ContractError::AssetNotFound as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_get_engineer_maintenance_history_caps_at_100() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Register and maintain 150 assets
+        for _ in 0..150 {
+            let asset_id = register_asset(&env, &asset_registry_client);
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, "maintenance"),
+                &engineer,
+            );
+        }
+
+        let history = client.get_engineer_maintenance_history(&engineer);
+        assert_eq!(history.len(), 100u32);
+    }
+
+    #[test]
+    fn test_get_engineer_maintenance_history_returns_all_if_under_100() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Register and maintain 50 assets
+        for _ in 0..50 {
+            let asset_id = register_asset(&env, &asset_registry_client);
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, "maintenance"),
+                &engineer,
+            );
+        }
+
+        let history = client.get_engineer_maintenance_history(&engineer);
+        assert_eq!(history.len(), 50u32);
     }
 
     // --- Issue #142: NotInitialized structured error ---
