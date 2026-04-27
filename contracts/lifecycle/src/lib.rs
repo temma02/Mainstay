@@ -1253,7 +1253,13 @@ impl Lifecycle {
     }
 
     /// Returns the timestamp of the most recent maintenance event, or None if no maintenance has been submitted.
+    ///
+    /// # Panics
+    /// - [`ContractError::NotInitialized`] if contract has not been initialized
+    /// - [`ContractError::AssetNotFound`] if the asset does not exist
     pub fn get_last_service_timestamp(env: Env, asset_id: u64) -> Option<u64> {
+        let asset_registry = get_asset_registry_addr(&env);
+        verify_asset_exists(&env, &asset_registry, &asset_id);
         env.storage().persistent().get(&last_update_key(asset_id))
     }
 
@@ -4327,6 +4333,21 @@ mod tests {
 
         let (client, _, _, _) = setup(&env, 0);
         let result = client.try_get_score_trend(&999u64, &10u32);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                asset_registry::ContractError::AssetNotFound as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_get_last_service_timestamp_nonexistent_asset_returns_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, _) = setup(&env, 0);
+        let result = client.try_get_last_service_timestamp(&999u64);
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
