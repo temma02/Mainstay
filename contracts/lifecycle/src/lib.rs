@@ -582,7 +582,6 @@ impl Lifecycle {
         let old_decay_interval = config.decay_interval;
         config.decay_rate = decay_rate;
         config.decay_interval = decay_interval;
-        env.storage().instance().set(&CONFIG, &config);
 
         env.events().publish(
             (symbol_short!("CFG_UPD"),),
@@ -2418,6 +2417,19 @@ mod tests {
         let new_score = client.get_collateral_score(&asset_id);
 
         assert_eq!(new_score, initial_score.saturating_sub(4));
+    }
+
+    #[test]
+    fn test_update_decay_config_persists_via_get_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, admin) = setup(&env, 0);
+        client.update_decay_config(&admin, &7, &3600);
+
+        let config = client.get_config();
+        assert_eq!(config.decay_rate, 7);
+        assert_eq!(config.decay_interval, 3600);
     }
 
     #[test]
