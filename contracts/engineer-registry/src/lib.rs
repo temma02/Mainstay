@@ -231,6 +231,17 @@ impl EngineerRegistry {
         );
     }
 
+    /// Renew an engineer's credential by extending the expiry.
+    /// Only the original issuer can renew credentials.
+    ///
+    /// # Arguments
+    /// * `engineer` - The address of the engineer whose credential should be renewed
+    /// * `new_validity_period` - Duration in seconds from now for the renewed credential
+    ///
+    /// # Panics
+    /// - [`ContractError::EngineerNotFound`] if no engineer exists with the given address
+    /// - [`ContractError::CredentialRevoked`] if the credential has been revoked
+    pub fn renew_credential(env: Env, engineer: Address, new_validity_period: u64) {
     pub fn renew_credential(env: Env, engineer: Address, new_validity_period: u64) {
         assert!(new_validity_period > 0, "new_validity_period must be greater than zero");
         ensure_not_paused(&env);
@@ -485,6 +496,13 @@ impl EngineerRegistry {
             .unwrap_or(Vec::new(&env));
         if !list.contains(issuer.clone()) {
             list.push_back(issuer.clone());
+            env.storage().instance().set(&issuer_list_key(), &list);
+            env.storage().instance().extend_ttl(518400, 518400);
+            env.events()
+                .publish((symbol_short!("ISS_ADD"), admin), (issuer,));
+        } else {
+            env.storage().instance().extend_ttl(518400, 518400);
+        }
         }
         env.storage().instance().set(&issuer_list_key(), &list);
         env.storage().instance().extend_ttl(518400, 518400);
@@ -1391,6 +1409,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let hash = BytesN::from_array(&env, &[1u8; 32]);
         client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &0);
         let result = client.try_register_engineer(&engineer, &hash, &issuer, &0);
         assert_eq!(
             result,
@@ -1447,6 +1466,39 @@ mod tests {
             })
             .count();
         assert_eq!(iss_add_count, 1, "ISS_ADD should only be emitted once");
+    }
+
+    // --- Issue #386: add_trusted_issuer and remove_trusted_issuer extend instance TTL ---
+
+    #[test]
+    fn test_add_trusted_issuer_extends_instance_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        client.add_trusted_issuer(&admin, &issuer);
+
+        let ttl = env.as_contract(&client.address, || {
+            env.storage().instance().get_ttl()
+        });
+        assert!(ttl > 0, "instance TTL must be extended after add_trusted_issuer");
+    }
+
+    #[test]
+    fn test_remove_trusted_issuer_extends_instance_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        client.add_trusted_issuer(&admin, &issuer);
+        client.remove_trusted_issuer(&admin, &issuer);
+
+        let ttl = env.as_contract(&client.address, || {
+            env.storage().instance().get_ttl()
+        });
+        assert!(ttl > 0, "instance TTL must be extended after remove_trusted_issuer");
     }
 
     #[test]
@@ -1547,6 +1599,9 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin) = setup(&env);
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         let engineer = Address::generate(&env);
         let issuer = Address::generate(&env);
@@ -2231,6 +2286,7 @@ assert_eq!(renewed.expires_at, original.expires_at + 86_400);
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin) = setup(&env);
+
         let issuer = Address::generate(&env);
         client.add_trusted_issuer(&admin, &issuer);
 
