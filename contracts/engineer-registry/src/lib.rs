@@ -1612,7 +1612,7 @@ mod tests {
         assert_eq!(renewed.issued_at, original.issued_at);
         assert_eq!(renewed.credential_hash, original.credential_hash);
         assert_eq!(renewed.issuer, original.issuer);
-assert_eq!(renewed.expires_at, original.expires_at + 86_400);
+        assert_eq!(renewed.expires_at, original.expires_at + 86_400);
         assert!(renewed.expires_at > original.expires_at);
         assert!(client.verify_engineer(&engineer));
     }
